@@ -43,39 +43,67 @@ func enqueueAndRespond[R any](
 	return onQueued("queued"), nil
 }
 
+// Shared components.responses in openapi.yaml get hoisted by oapi-codegen
+// into named types (QueuedJSONResponse, BadRequestJSONResponse, etc.), and
+// each operation's response type embeds one of those anonymously - so
+// building e.g. PostLed202JSONResponse means constructing the embedded
+// QueuedJSONResponse field, not a top-level Status field directly.
+
+func badRequestResponse(msg string) apigen.BadRequestJSONResponse {
+	return apigen.BadRequestJSONResponse{Error: msg}
+}
+
 func (h *Handlers) PostLed(_ context.Context, request apigen.PostLedRequestObject) (apigen.PostLedResponseObject, error) {
 	return enqueueAndRespond[apigen.PostLedResponseObject](h, command.LEDCommand{On: request.Body.On},
-		func(s string) apigen.PostLedResponseObject { return apigen.PostLed202JSONResponse{Status: s} },
-		func(m string) apigen.PostLedResponseObject { return apigen.PostLed503JSONResponse{Error: m} },
-		func(m string) apigen.PostLedResponseObject { return apigen.PostLed500JSONResponse{Error: m} },
+		func(s string) apigen.PostLedResponseObject {
+			return apigen.PostLed202JSONResponse{QueuedJSONResponse: apigen.QueuedJSONResponse{Status: s}}
+		},
+		func(m string) apigen.PostLedResponseObject {
+			return apigen.PostLed503JSONResponse{QueueFullJSONResponse: apigen.QueueFullJSONResponse{Error: m}}
+		},
+		func(m string) apigen.PostLedResponseObject {
+			return apigen.PostLed500JSONResponse{InternalErrorJSONResponse: apigen.InternalErrorJSONResponse{Error: m}}
+		},
 	)
 }
 
 func (h *Handlers) PostStepper(_ context.Context, request apigen.PostStepperRequestObject) (apigen.PostStepperResponseObject, error) {
 	if request.Body.Steps <= 0 {
-		return apigen.PostStepper400JSONResponse{Error: "steps must be a positive integer"}, nil
+		return apigen.PostStepper400JSONResponse{BadRequestJSONResponse: badRequestResponse("steps must be a positive integer")}, nil
 	}
 	dir := command.Direction(request.Body.Dir)
 	if dir != command.DirCW && dir != command.DirCCW {
-		return apigen.PostStepper400JSONResponse{Error: fmt.Sprintf("dir must be %q or %q", command.DirCW, command.DirCCW)}, nil
+		return apigen.PostStepper400JSONResponse{BadRequestJSONResponse: badRequestResponse(fmt.Sprintf("dir must be %q or %q", command.DirCW, command.DirCCW))}, nil
 	}
 
 	return enqueueAndRespond[apigen.PostStepperResponseObject](h, command.StepperCommand{Steps: request.Body.Steps, Dir: dir},
-		func(s string) apigen.PostStepperResponseObject { return apigen.PostStepper202JSONResponse{Status: s} },
-		func(m string) apigen.PostStepperResponseObject { return apigen.PostStepper503JSONResponse{Error: m} },
-		func(m string) apigen.PostStepperResponseObject { return apigen.PostStepper500JSONResponse{Error: m} },
+		func(s string) apigen.PostStepperResponseObject {
+			return apigen.PostStepper202JSONResponse{QueuedJSONResponse: apigen.QueuedJSONResponse{Status: s}}
+		},
+		func(m string) apigen.PostStepperResponseObject {
+			return apigen.PostStepper503JSONResponse{QueueFullJSONResponse: apigen.QueueFullJSONResponse{Error: m}}
+		},
+		func(m string) apigen.PostStepperResponseObject {
+			return apigen.PostStepper500JSONResponse{InternalErrorJSONResponse: apigen.InternalErrorJSONResponse{Error: m}}
+		},
 	)
 }
 
 func (h *Handlers) PostServo(_ context.Context, request apigen.PostServoRequestObject) (apigen.PostServoResponseObject, error) {
 	deg := request.Body.AngleDeg
 	if deg < h.ServoMinAngle || deg > h.ServoMaxAngle {
-		return apigen.PostServo400JSONResponse{Error: fmt.Sprintf("angle_deg must be between %.2f and %.2f", h.ServoMinAngle, h.ServoMaxAngle)}, nil
+		return apigen.PostServo400JSONResponse{BadRequestJSONResponse: badRequestResponse(fmt.Sprintf("angle_deg must be between %.2f and %.2f", h.ServoMinAngle, h.ServoMaxAngle))}, nil
 	}
 
 	return enqueueAndRespond[apigen.PostServoResponseObject](h, command.ServoCommand{AngleDeg: deg},
-		func(s string) apigen.PostServoResponseObject { return apigen.PostServo202JSONResponse{Status: s} },
-		func(m string) apigen.PostServoResponseObject { return apigen.PostServo503JSONResponse{Error: m} },
-		func(m string) apigen.PostServoResponseObject { return apigen.PostServo500JSONResponse{Error: m} },
+		func(s string) apigen.PostServoResponseObject {
+			return apigen.PostServo202JSONResponse{QueuedJSONResponse: apigen.QueuedJSONResponse{Status: s}}
+		},
+		func(m string) apigen.PostServoResponseObject {
+			return apigen.PostServo503JSONResponse{QueueFullJSONResponse: apigen.QueueFullJSONResponse{Error: m}}
+		},
+		func(m string) apigen.PostServoResponseObject {
+			return apigen.PostServo500JSONResponse{InternalErrorJSONResponse: apigen.InternalErrorJSONResponse{Error: m}}
+		},
 	)
 }
