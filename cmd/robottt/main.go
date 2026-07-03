@@ -40,21 +40,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("hardware: %v", err)
 	}
-	// Stepper and servo construction disabled for LED-only bring-up
-	// (stepper/servo not wired yet). Re-enable once wired:
+	// Stepper construction disabled for now (not wired yet). Re-enable once wired:
 	//
 	// stepper, err := gpiodirect.NewStepper(cfg.GPIOChip, cfg.StepperStepOffset, cfg.StepperDirOffset, cfg.StepperPulseDelay)
 	// if err != nil {
 	// 	log.Fatalf("hardware: %v", err)
 	// }
-	// servo, err := gpiodirect.NewServo(cfg.ServoChipPath, cfg.ServoChannel, cfg.ServoMinAngle, cfg.ServoMaxAngle)
-	// if err != nil {
-	// 	log.Fatalf("hardware: %v", err)
-	// }
+	servo, err := gpiodirect.NewServo(cfg.ServoChipPath, cfg.ServoChannel, cfg.ServoMinAngle, cfg.ServoMaxAngle)
+	if err != nil {
+		log.Fatalf("hardware: %v", err)
+	}
 
 	queue := command.NewChannelQueue(cfg.QueueCapacity)
 
-	exec := &executor.Executor{Queue: queue, GPIO: gpio}
+	exec := &executor.Executor{Queue: queue, GPIO: gpio, Servo: servo}
 
 	handlers := &api.Handlers{
 		Queue:         queue,
