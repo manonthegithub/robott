@@ -11,7 +11,7 @@
 - [x] Component 5: `internal/api` — implemented + unit tests written (httptest)
 - [x] Component 6: `internal/config` — implemented + unit tests written
 - [x] Component 7: `cmd/robottt/main.go` — wiring implemented
-- [ ] **Not yet run**: no Go toolchain on dev machine — code has not been compiled or `go test` run anywhere. Must build/test on Pi 5 (or install Go) before trusting it.
+- [x] **Built + tested on Pi 5** (Go 1.22.12, arm64) — `go test ./...` all green: `command`, `api`, `config`, `executor`, `gpiodirect` pass; `cmd/robottt` and `hardware` correctly have no test files (wiring / pure interfaces).
 - [ ] Refactor + tooling — not started (linter/formatter, pre-commit hook)
 - [ ] Production build — not started
 - [ ] Deployment — not started (n/a unless containerized/deployed as a service)
@@ -27,7 +27,6 @@
 - No auth in v1; `api.NewRouter` takes variadic `Middleware`, empty for now — auth becomes one added middleware, no handler rewrite.
 
 ## Open questions / blockers
-- **Go toolchain not available on dev machine.** All code written and reasoned through carefully, but never compiled. First step on Pi 5 (or wherever Go gets installed): `go mod tidy && go build ./... && go vet ./... && go test ./...` — expect to fix minor compile issues before anything else.
 - GPIO chip name (`GPIO_CHIP` env var, e.g. `gpiochip4`) and exact pin offsets for LED/STEP/DIR are Pi5/wiring-specific — must be confirmed against actual wiring before first run.
 - Sysfs PWM chip/channel path (`SERVO_CHIP_PATH`, e.g. `/sys/class/pwm/pwmchip0`) depends on which PWM-capable GPIO pin is wired and whether the `dtoverlay=pwm` (or similar) is enabled in Pi5's `/boot/firmware/config.txt` — needs to be set up on the Pi and confirmed before servo will work (architecture decision #3).
 - No linter/formatter wired yet (workflow phase 7, not started — code not compiled/tested yet so premature).

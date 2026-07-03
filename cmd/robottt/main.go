@@ -8,9 +8,12 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/joho/godotenv"
 
 	"robottt/internal/api"
 	"robottt/internal/command"
@@ -20,6 +23,13 @@ import (
 )
 
 func main() {
+	// .env is optional: local/dev convenience, absent in prod (systemd unit
+	// sets real env vars instead). Only report load errors for a file that
+	// actually exists.
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
+		log.Fatalf(".env: %v", err)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config: %v", err)
