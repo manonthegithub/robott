@@ -206,3 +206,56 @@ status codes, JSON shapes) so `internal/executor`, `internal/hardware`,
   in lock-step with validation rules twice). Enum/range validation stays
   hand-written in Go, same as before codegen. Revisit if the schema grows
   complex enough that doc/code drift becomes a real risk.
+
+---
+
+## 9. Serve OpenAPI spec over HTTP
+
+Moved `openapi.yaml` into `internal/api/` (go:embed can't reach outside its
+package directory) and embed it directly into the binary, served at
+`GET /openapi.yaml` on the same router. Lets an MCP wrapper (or anything
+else) fetch the live contract at runtime instead of needing repo access.
+Updated the `//go:generate` directive path in `internal/api/gen/generate.go`
+to match the new location.
+
+**Definition of done**: `curl localhost:8080/openapi.yaml` returns the spec.
+
+---
+
+## 10. MCP wrapper (`cmd/robottt-mcp`)
+
+A separate binary/process, not part of the HTTP server: translates MCP tool
+calls into HTTP requests against this API, so an LLM (Claude Desktop/Code
+etc.) can drive the robot. Kept as its own binary rather than a mode flag on
+`cmd/robottt`, since it's a distinct concern that could run on a different
+host later.
+
+**Steps**
+1. Enable the oapi-codegen `client` generator (`internal/api/gen/oapi-codegen.yaml`)
+   so `apigen.ClientWithResponses` — a typed HTTP client generated from the
+   same spec — exists to call the robot API, instead of hand-writing HTTP
+   calls a second time.
+2. `internal/mcpserver/server.go`: wraps `apigen.ClientWithResponses`, exposes
+   3 MCP tools (`set_led`, `move_stepper`, `set_servo`) via the official
+   `github.com/modelcontextprotocol/go-sdk`. Each tool handler calls the
+   corresponding generated client method and maps the HTTP response into an
+   MCP tool result (error flag set on 4xx/5xx).
+3. `cmd/robottt-mcp/main.go`: reads `ROBOT_API_URL` (default
+   `http://localhost:8080`), builds the server, runs over stdio transport
+   (standard for locally-invoked MCP servers, e.g. Claude Desktop config).
+
+**Error cases**
+- Robot API unreachable / non-2xx → tool result marked as error, HTTP
+  status + body surfaced as the result text (so the LLM sees why a command
+  failed, e.g. queue full → 503).
+
+**Definition of done**
+- `go build ./cmd/robottt-mcp` succeeds.
+- Manual check: point an MCP-capable client (or `mcp` CLI inspector) at the
+  binary, call `set_led`, confirm it reaches the running `robottt` HTTP
+  server and toggles the LED.
+
+**Decision flagged for scrutiny**
+- Written without a local Go toolchain to confirm `github.com/modelcontextprotocol/go-sdk`'s
+  exact API surface (same situation as oapi-codegen in component 8) — expect
+  a fix-up round once built on the Pi.

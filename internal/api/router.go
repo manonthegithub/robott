@@ -32,14 +32,20 @@ func limitBody(next http.Handler) http.Handler {
 }
 
 // NewRouter builds the HTTP handler for all robot control endpoints from
-// the generated strict server, wired to h.
+// the generated strict server, wired to h, plus a GET /openapi.yaml route
+// serving the contract itself (so an MCP wrapper or other client can fetch
+// it at runtime instead of needing repo access).
 func NewRouter(h *Handlers, mw ...Middleware) http.Handler {
 	strict := apigen.NewStrictHandlerWithOptions(h, nil, apigen.StrictHTTPServerOptions{
 		RequestErrorHandlerFunc:  writeStrictError,
 		ResponseErrorHandlerFunc: writeStrictError,
 	})
-	mux := apigen.Handler(strict)
-	return chain(mux, append([]Middleware{limitBody}, mw...)...)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /openapi.yaml", serveOpenAPISpec)
+	handler := apigen.HandlerFromMux(strict, mux)
+
+	return chain(handler, append([]Middleware{limitBody}, mw...)...)
 }
 
 // writeStrictError renders request-decode/response-encode failures from the
