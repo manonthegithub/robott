@@ -180,3 +180,37 @@ func TestExecutor_ContextCancelStopsLoopAndClosesControllers(t *testing.T) {
 		t.Fatalf("expected all controllers closed: gpio=%v stepper=%v servo=%v", gpio.closed, stepper.closed, servo.closed)
 	}
 }
+
+func TestExecutor_NilStepperAndServoDropCommandsWithoutPanic(t *testing.T) {
+	q := &fakeQueue{cmds: []command.Command{
+		command.StepperCommand{Steps: 5, Dir: command.DirCW},
+		command.ServoCommand{AngleDeg: 45},
+		command.LEDCommand{On: true},
+	}}
+	gpio := &fakeGPIO{}
+	e := &Executor{Queue: q, GPIO: gpio}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		e.Run(ctx)
+		close(done)
+	}()
+
+	waitFor(t, func() bool {
+		gpio.mu.Lock()
+		defer gpio.mu.Unlock()
+		return len(gpio.calls) == 1
+	})
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run() did not return within 1s of ctx cancel")
+	}
+
+	if !gpio.closed {
+		t.Fatal("expected GPIO controller closed")
+	}
+}

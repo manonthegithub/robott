@@ -39,8 +39,16 @@ func (e *Executor) dispatch(cmd command.Command) {
 	case command.LEDCommand:
 		err = e.GPIO.SetLED(c.On)
 	case command.StepperCommand:
+		if e.Stepper == nil {
+			log.Print("executor: stepper controller not wired, dropping command")
+			return
+		}
 		err = e.Stepper.Move(c.Steps, c.Dir)
 	case command.ServoCommand:
+		if e.Servo == nil {
+			log.Print("executor: servo controller not wired, dropping command")
+			return
+		}
 		err = e.Servo.SetAngle(c.AngleDeg)
 	default:
 		log.Printf("executor: unknown command type %T, dropping", cmd)
@@ -55,10 +63,14 @@ func (e *Executor) closeAll() {
 	if err := e.GPIO.Close(); err != nil {
 		log.Printf("executor: close GPIO controller: %v", err)
 	}
-	if err := e.Stepper.Close(); err != nil {
-		log.Printf("executor: close stepper controller: %v", err)
+	if e.Stepper != nil {
+		if err := e.Stepper.Close(); err != nil {
+			log.Printf("executor: close stepper controller: %v", err)
+		}
 	}
-	if err := e.Servo.Close(); err != nil {
-		log.Printf("executor: close servo controller: %v", err)
+	if e.Servo != nil {
+		if err := e.Servo.Close(); err != nil {
+			log.Printf("executor: close servo controller: %v", err)
+		}
 	}
 }
