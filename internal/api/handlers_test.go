@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -149,5 +150,16 @@ func TestHandlers_QueueFullReturns503(t *testing.T) {
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+}
+
+func TestHandlers_UnexpectedQueueErrorReturns500(t *testing.T) {
+	q := &fakeQueue{err: errors.New("boom")}
+	h := newRouter(q)
+
+	rec := doRequest(t, h, http.MethodPost, "/led", map[string]any{"on": true})
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
 	}
 }

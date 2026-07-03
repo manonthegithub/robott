@@ -1,0 +1,135 @@
+openapi: 3.0.3
+info:
+  title: Robot Control API
+  version: 1.0.0
+  description: >
+    HTTP API for controlling LED, stepper motor, and servo motor on a
+    Raspberry Pi 5 robot. Commands are queued and executed asynchronously;
+    a 202 response means the command was accepted onto the queue, not that
+    it finished executing.
+paths:
+  /led:
+    post:
+      operationId: postLed
+      summary: Turn the LED on or off
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LedRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/Queued'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/QueueFull'
+  /stepper:
+    post:
+      operationId: postStepper
+      summary: Move the stepper motor a number of steps in a direction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StepperRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/Queued'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/QueueFull'
+  /servo:
+    post:
+      operationId: postServo
+      summary: Set the servo to an absolute angle in degrees
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServoRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/Queued'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/QueueFull'
+
+components:
+  schemas:
+    LedRequest:
+      type: object
+      required: [on]
+      properties:
+        on:
+          type: boolean
+    StepperRequest:
+      type: object
+      required: [steps, dir]
+      properties:
+        steps:
+          type: integer
+          minimum: 1
+          description: Number of steps, must be positive. Enforced in code, not just schema.
+        dir:
+          type: string
+          enum: [cw, ccw]
+          description: Enforced in code, not just schema (see docs/plan.md component 8 decision note).
+    ServoRequest:
+      type: object
+      required: [angle_deg]
+      properties:
+        angle_deg:
+          type: number
+          format: double
+          description: Must fall within the server's configured servo angle range (checked in code, range is runtime config, not a schema constant).
+    QueuedResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: queued
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+  responses:
+    Queued:
+      description: Command accepted onto the queue (not yet executed)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/QueuedResponse'
+    BadRequest:
+      description: Request failed validation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    QueueFull:
+      description: Command queue has no free capacity, retry later
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: Unexpected server-side failure
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

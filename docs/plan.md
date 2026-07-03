@@ -135,3 +135,74 @@ Components in dependency order. Each done = tests green before next starts.
 **Definition of done**
 - `go build` produces working binary.
 - Manual smoke test on Pi5: start binary, hit all 3 endpoints via curl, verify hardware response, verify Ctrl+C shuts down cleanly (no goroutine leak, GPIO lines released).
+
+---
+
+## 8. OpenAPI spec + codegen HTTP layer
+
+Motivation: the robot will be driven by an LLM (via MCP later), not just curl. A
+formal OpenAPI contract is what an MCP wrapper (or any other client tooling)
+consumes to know the API's shape — hand-maintained docs would drift. This
+component replaces the internals of `internal/api` with generated request/
+response types + routing, keeping the same external contract (endpoints,
+status codes, JSON shapes) so `internal/executor`, `internal/hardware`,
+`internal/command`, `internal/config` are untouched.
+
+**Steps**
+1. Write `openapi.yaml` (repo root, OpenAPI 3.0.3): paths `/led`, `/stepper`,
+   `/servo`, each `POST`, request/response schemas matching the existing hand
+   -written DTOs (`LedRequest{on}`, `StepperRequest{steps,dir enum[cw,ccw]}`,
+   `ServoRequest{angle_deg}`, `QueuedResponse{status}`, `ErrorResponse{error}`),
+   responses `202`/`400`/`503`/`500`.
+2. Add `oapi-codegen` (v2, `strict-server` + `std-http-server` generators —
+   the latter targets Go 1.22 `http.ServeMux`, matching our existing stack).
+   Config in `internal/api/gen/oapi-codegen.yaml`, generated output
+   `internal/api/gen/server.gen.go` (package `apigen`, not hand-edited),
+   driven by a `//go:generate` directive.
+3. Rewrite `internal/api/handlers.go` to implement `apigen.StrictServerInterface`
+   (one method per operation, typed request/response objects). Reuse a single
+   generic helper (`enqueueAndRespond[R any]`) for the shared
+   enqueue-then-map-to-response-type logic across all 3 handlers, since the
+   generated response types are structurally identical but distinct per
+   operation. Business-rule validation not expressible in JSON Schema (steps
+   > 0, servo angle range from config) stays hand-written in each handler,
+   returning the generated 400 response type directly.
+4. Rewrite `internal/api/router.go`: build the generated strict handler with
+   custom `RequestErrorHandlerFunc`/`ResponseErrorHandlerFunc` (so malformed
+   JSON still yields our `{"error": "..."}` shape, not the generator's
+   default plain text), wrap in a body-size-limit `Middleware` (replaces the
+   old `http.MaxBytesReader` call site), keep the existing `Middleware` chain
+   for the future auth slot.
+5. Delete `internal/api/dto.go` (types now generated).
+6. Rewrite `internal/api/handlers_test.go` — stays black-box httptest against
+   `NewRouter`, same request/response JSON asserted, so most cases carry over
+   with minimal changes.
+
+**Inputs/outputs/side effects**
+- No behavior change visible to HTTP clients — same endpoints/status codes/
+  JSON shapes as before.
+- Generated file is a build artifact in the sense that it's produced by
+  `go generate`, but is committed (Go convention: commit generated code so
+  `go build` doesn't require `oapi-codegen` installed).
+
+**Error cases**
+- Same as component 5 (malformed JSON → 400, validation failure → 400, queue
+  full → 503) plus explicit 500 mapping for any non-`ErrQueueFull` enqueue
+  error (previously an implicit/unreachable branch — now a real generated
+  response type, closes the gap in the error-handling checklist).
+
+**Definition of done**
+- `go generate ./...` produces `server.gen.go` without errors.
+- `go build ./... && go test ./...` green, `internal/api` tests pass against
+  the new generated-type-based handlers with no change in asserted HTTP
+  behavior.
+- `openapi.yaml` validates as well-formed OpenAPI 3.0.3 (checked implicitly
+  by `oapi-codegen` accepting it).
+
+**Decision flagged for scrutiny**
+- JSON Schema constraints like `dir: enum[cw,ccw]` and `steps: minimum: 1` are
+  documentation-only unless paired with a request-validation middleware
+  (e.g. `kin-openapi` validator) — not added here (would need the spec kept
+  in lock-step with validation rules twice). Enum/range validation stays
+  hand-written in Go, same as before codegen. Revisit if the schema grows
+  complex enough that doc/code drift becomes a real risk.
