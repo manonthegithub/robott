@@ -222,44 +222,50 @@ to match the new location.
 
 ---
 
-## 10. MCP wrapper (`cmd/robottt-mcp`)
+## 10. MCP wrapper (`internal/mcpserver`, mounted in `cmd/robottt`)
 
-A separate binary/process, not part of the HTTP server: translates MCP tool
-calls into HTTP requests against this API, so an LLM (Claude Desktop/Code
-etc.) can drive the robot. Kept as its own binary rather than a mode flag on
-`cmd/robottt`, since it's a distinct concern that could run on a different
-host later.
+Exposes the robot as MCP tools, so an LLM (Claude Desktop/Code etc.) can
+drive it. Originally built as a separate binary/process (`cmd/robottt-mcp`)
+translating MCP calls into HTTP requests against the REST API, on its own
+port — reconsidered once it was clear that "could run on a different host
+later" wasn't a benefit actually being used for one robot on one Pi, and was
+just costing two processes/ports to keep in sync (`ROBOT_API_URL`,
+`MCP_LISTEN_ADDR`). Folded into the same process as the REST API instead:
+same port, mounted at `/mcp` on the same `http.ServeMux`, MCP tool handlers
+call `api.Handlers` methods directly (no HTTP round-trip to itself). The
+oapi-codegen `client` generator (added, then no longer needed) was removed
+again.
 
 **Steps**
-1. Enable the oapi-codegen `client` generator (`internal/api/gen/oapi-codegen.yaml`)
-   so `apigen.ClientWithResponses` — a typed HTTP client generated from the
-   same spec — exists to call the robot API, instead of hand-writing HTTP
-   calls a second time.
-2. `internal/mcpserver/server.go`: wraps `apigen.ClientWithResponses`, exposes
-   3 MCP tools (`set_led`, `move_stepper`, `set_servo`) via the official
-   `github.com/modelcontextprotocol/go-sdk`. Each tool handler calls the
-   corresponding generated client method and maps the HTTP response into an
-   MCP tool result (error flag set on 4xx/5xx).
-3. `cmd/robottt-mcp/main.go`: reads `ROBOT_API_URL` (default
-   `http://localhost:8080`) and `MCP_LISTEN_ADDR` (default `:8081`), builds
-   the server, serves over HTTP (`mcp.NewStreamableHTTPHandler`) rather than
-   stdio — the Pi is already reachable on the network at a fixed address, so
-   an MCP client (e.g. Claude Code on another machine) can connect directly
-   via `claude mcp add robottt --transport http http://<pi>:8081` instead of
-   needing to SSH in to spawn a stdio subprocess.
+1. `internal/mcpserver/server.go`: `Server` wraps `*api.Handlers` directly.
+   Each MCP tool handler builds the matching generated request object
+   (e.g. `apigen.PostLedRequestObject{Body: &apigen.LedRequest{...}}`) and
+   calls the handler method in-process. The generated response object's
+   `Visit*Response(w http.ResponseWriter) error` method is invoked against
+   an `httptest.ResponseRecorder` to get an HTTP status/body pair without an
+   actual network call, reusing the same response-encoding logic the REST
+   API uses — then mapped into an MCP tool result (error flag on 4xx/5xx).
+2. `Server.HTTPHandler()` builds the `*mcp.Server`, registers the 3 tools
+   (`set_led`, `move_stepper`, `set_servo`), and returns
+   `mcp.NewStreamableHTTPHandler(...)` as a plain `http.Handler`.
+3. `cmd/robottt/main.go`: builds one `*api.Handlers`, shares it between
+   `api.NewRouter` (mounted at `/`) and `mcpserver.New(handlers).HTTPHandler()`
+   (mounted at `/mcp`) on one `http.ServeMux`, one `http.Server`, one port
+   (`cfg.ListenAddr`). An MCP client anywhere on the network connects via
+   `claude mcp add robottt --transport http http://<pi>:8080/mcp`.
 
 **Error cases**
-- Robot API unreachable / non-2xx → tool result marked as error, HTTP
-  status + body surfaced as the result text (so the LLM sees why a command
-  failed, e.g. queue full → 503).
+- Validation/queue-full/internal-error cases are identical to the REST API
+  (component 5/8) since the same `Handlers` methods run either way — surfaced
+  as the MCP tool result's status+body text, error flag set on 4xx/5xx.
 
 **Definition of done**
-- `go build ./cmd/robottt-mcp` succeeds.
-- Manual check: point an MCP-capable client (or `mcp` CLI inspector) at the
-  binary, call `set_led`, confirm it reaches the running `robottt` HTTP
-  server and toggles the LED.
+- `go build ./... && go test ./...` green.
+- Manual check: `claude mcp add` the running server, call `set_led` through
+  an MCP client, confirm it reaches the same process and toggles the LED.
 
 **Decision flagged for scrutiny**
 - Written without a local Go toolchain to confirm `github.com/modelcontextprotocol/go-sdk`'s
-  exact API surface (same situation as oapi-codegen in component 8) — expect
-  a fix-up round once built on the Pi.
+  exact API surface for `mcp.NewStreamableHTTPHandler` (previously verified
+  for `mcp.NewServer`/`mcp.AddTool`/stdio transport in the earlier round) —
+  expect a possible fix-up round once built on the Pi.

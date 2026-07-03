@@ -20,6 +20,7 @@ import (
 	"robottt/internal/config"
 	"robottt/internal/executor"
 	"robottt/internal/hardware/gpiodirect"
+	"robottt/internal/mcpserver"
 )
 
 func main() {
@@ -55,12 +56,19 @@ func main() {
 
 	exec := &executor.Executor{Queue: queue, GPIO: gpio}
 
-	router := api.NewRouter(&api.Handlers{
+	handlers := &api.Handlers{
 		Queue:         queue,
 		ServoMinAngle: cfg.ServoMinAngle,
 		ServoMaxAngle: cfg.ServoMaxAngle,
-	})
-	server := &http.Server{Addr: cfg.ListenAddr, Handler: router}
+	}
+
+	// REST API and MCP wrapper share one process/port: MCP calls handlers
+	// directly (no network hop to itself), just mounted at a different path.
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", mcpserver.New(handlers).HTTPHandler())
+	mux.Handle("/", api.NewRouter(handlers))
+
+	server := &http.Server{Addr: cfg.ListenAddr, Handler: mux}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

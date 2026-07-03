@@ -1,31 +1,38 @@
-// Package mcpserver exposes the robot HTTP API as MCP tools, so an
-// MCP-capable LLM client can drive the robot. It's a thin translation layer:
-// each tool call becomes one HTTP request via the generated API client
-// (robottt/internal/api/gen), no hardware or queue logic lives here.
+// Package mcpserver exposes the robot API as MCP tools, so an MCP-capable
+// LLM client can drive the robot. It runs in the same process as the REST
+// API (mounted at /mcp by cmd/robottt), calling api.Handlers directly - no
+// network hop to itself.
 package mcpserver
 
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"robottt/internal/api"
 	apigen "robottt/internal/api/gen"
 )
 
-// Server wraps a robot API client and registers MCP tools against it.
+// Server wraps the robot API's handlers and registers MCP tools against
+// them.
 type Server struct {
-	client *apigen.ClientWithResponses
+	handlers *api.Handlers
 }
 
-// New builds a Server calling the robot API at baseURL (e.g.
-// "http://localhost:8080").
-func New(baseURL string) (*Server, error) {
-	client, err := apigen.NewClientWithResponses(baseURL)
-	if err != nil {
-		return nil, fmt.Errorf("mcpserver: create API client for %s: %w", baseURL, err)
-	}
-	return &Server{client: client}, nil
+// New builds a Server calling straight into handlers.
+func New(handlers *api.Handlers) *Server {
+	return &Server{handlers: handlers}
+}
+
+// HTTPHandler builds the MCP server and returns it as an http.Handler,
+// ready to be mounted on a path (e.g. "/mcp") alongside the REST routes.
+func (s *Server) HTTPHandler() http.Handler {
+	mcpServer := mcp.NewServer(&mcp.Implementation{Name: "robottt", Version: "1.0.0"}, nil)
+	s.registerTools(mcpServer)
+	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, nil)
 }
 
 // LedInput is the set_led tool's input schema.
@@ -44,8 +51,7 @@ type ServoInput struct {
 	AngleDeg float64 `json:"angle_deg" jsonschema:"target servo angle in degrees"`
 }
 
-// RegisterTools adds all robot control tools to server.
-func (s *Server) RegisterTools(server *mcp.Server) {
+func (s *Server) registerTools(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "set_led",
 		Description: "Turn the robot's LED on or off",
@@ -63,38 +69,42 @@ func (s *Server) RegisterTools(server *mcp.Server) {
 }
 
 func (s *Server) handleSetLED(ctx context.Context, _ *mcp.CallToolRequest, in LedInput) (*mcp.CallToolResult, any, error) {
-	resp, err := s.client.PostLedWithResponse(ctx, apigen.PostLedJSONRequestBody{On: in.On})
+	resp, err := s.handlers.PostLed(ctx, apigen.PostLedRequestObject{Body: &apigen.LedRequest{On: in.On}})
 	if err != nil {
-		return nil, nil, fmt.Errorf("mcpserver: call /led: %w", err)
+		return nil, nil, fmt.Errorf("mcpserver: PostLed: %w", err)
 	}
-	return httpResult(resp.StatusCode(), resp.Body), nil, nil
+	return renderResult(resp.VisitPostLedResponse)
 }
 
 func (s *Server) handleMoveStepper(ctx context.Context, _ *mcp.CallToolRequest, in StepperInput) (*mcp.CallToolResult, any, error) {
-	resp, err := s.client.PostStepperWithResponse(ctx, apigen.PostStepperJSONRequestBody{
+	resp, err := s.handlers.PostStepper(ctx, apigen.PostStepperRequestObject{Body: &apigen.StepperRequest{
 		Steps: in.Steps,
 		Dir:   apigen.StepperRequestDir(in.Dir),
-	})
+	}})
 	if err != nil {
-		return nil, nil, fmt.Errorf("mcpserver: call /stepper: %w", err)
+		return nil, nil, fmt.Errorf("mcpserver: PostStepper: %w", err)
 	}
-	return httpResult(resp.StatusCode(), resp.Body), nil, nil
+	return renderResult(resp.VisitPostStepperResponse)
 }
 
 func (s *Server) handleSetServo(ctx context.Context, _ *mcp.CallToolRequest, in ServoInput) (*mcp.CallToolResult, any, error) {
-	resp, err := s.client.PostServoWithResponse(ctx, apigen.PostServoJSONRequestBody{AngleDeg: in.AngleDeg})
+	resp, err := s.handlers.PostServo(ctx, apigen.PostServoRequestObject{Body: &apigen.ServoRequest{AngleDeg: in.AngleDeg}})
 	if err != nil {
-		return nil, nil, fmt.Errorf("mcpserver: call /servo: %w", err)
+		return nil, nil, fmt.Errorf("mcpserver: PostServo: %w", err)
 	}
-	return httpResult(resp.StatusCode(), resp.Body), nil, nil
+	return renderResult(resp.VisitPostServoResponse)
 }
 
-// httpResult renders an HTTP response as an MCP tool result, flagging
-// non-2xx as an error so the LLM sees why a command failed (e.g. 503 queue
-// full) rather than just getting silent text back.
-func httpResult(status int, body []byte) *mcp.CallToolResult {
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("HTTP %d: %s", status, string(body))}},
-		IsError: status >= 400,
+// renderResult runs a generated response object's Visit method against a
+// recorder to get its HTTP status/body without an actual network
+// round-trip, then maps that into an MCP tool result.
+func renderResult(visit func(w http.ResponseWriter) error) (*mcp.CallToolResult, any, error) {
+	rec := httptest.NewRecorder()
+	if err := visit(rec); err != nil {
+		return nil, nil, fmt.Errorf("mcpserver: render response: %w", err)
 	}
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("HTTP %d: %s", rec.Code, rec.Body.String())}},
+		IsError: rec.Code >= 400,
+	}, nil, nil
 }
