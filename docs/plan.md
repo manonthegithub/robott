@@ -241,8 +241,12 @@ host later.
    corresponding generated client method and maps the HTTP response into an
    MCP tool result (error flag set on 4xx/5xx).
 3. `cmd/robottt-mcp/main.go`: reads `ROBOT_API_URL` (default
-   `http://localhost:8080`), builds the server, runs over stdio transport
-   (standard for locally-invoked MCP servers, e.g. Claude Desktop config).
+   `http://localhost:8080`) and `MCP_LISTEN_ADDR` (default `:8081`), builds
+   the server, serves over HTTP (`mcp.NewStreamableHTTPHandler`) rather than
+   stdio — the Pi is already reachable on the network at a fixed address, so
+   an MCP client (e.g. Claude Code on another machine) can connect directly
+   via `claude mcp add robottt --transport http http://<pi>:8081` instead of
+   needing to SSH in to spawn a stdio subprocess.
 
 **Error cases**
 - Robot API unreachable / non-2xx → tool result marked as error, HTTP
