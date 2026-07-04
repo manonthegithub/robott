@@ -142,6 +142,41 @@ func TestHandleSetServo_HappyPath(t *testing.T) {
 	}
 }
 
+func TestHandleRunSequence_BodyAsRealJSONDecodedMap(t *testing.T) {
+	// Body's static type is []any specifically to dodge the MCP SDK's
+	// schema-reflection cycle panic on a self-referential struct (see
+	// sequence_convert.go). At runtime, an actual MCP tool call JSON-decodes
+	// "body" generically, so each element arrives as map[string]any, not a
+	// SequenceStepInput value — this is the shape decodeStep actually has
+	// to handle, not just the convenience literal used in other tests.
+	q := &fakeQueue{}
+	s := newTestServer(q)
+
+	in := RunSequenceInput{Seq: []SequenceStepInput{
+		{Type: "loop", Times: 2, Body: []any{
+			map[string]any{"type": "led", "on": true},
+		}},
+	}}
+
+	res, _, err := s.handleRunSequence(context.Background(), nil, in)
+	if err != nil {
+		t.Fatalf("handleRunSequence() error = %v, want nil", err)
+	}
+	if res.IsError {
+		t.Fatalf("handleRunSequence() result is an error: %s", resultText(t, res))
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && len(q.snapshot()) < 2 {
+		time.Sleep(2 * time.Millisecond)
+	}
+	got := q.snapshot()
+	want := []command.Command{command.LEDCommand{On: true}, command.LEDCommand{On: true}}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("enqueued = %v, want %v", got, want)
+	}
+}
+
 func TestHandleRunSequence_HappyPath(t *testing.T) {
 	q := &fakeQueue{}
 	s := newTestServer(q)
@@ -149,8 +184,8 @@ func TestHandleRunSequence_HappyPath(t *testing.T) {
 	in := RunSequenceInput{Seq: []SequenceStepInput{
 		{Type: "led", On: true},
 		{Type: "servo", AngleDeg: 90},
-		{Type: "loop", Times: 2, Body: []SequenceStepInput{
-			{Type: "led", On: false},
+		{Type: "loop", Times: 2, Body: []any{
+			SequenceStepInput{Type: "led", On: false},
 		}},
 	}}
 
@@ -238,8 +273,8 @@ func TestHandleRunSequence_ThenStopSequenceStopsIt(t *testing.T) {
 	s := newTestServer(q)
 
 	infinite := RunSequenceInput{Seq: []SequenceStepInput{
-		{Type: "loop", Times: 0, Body: []SequenceStepInput{
-			{Type: "led", On: true},
+		{Type: "loop", Times: 0, Body: []any{
+			SequenceStepInput{Type: "led", On: true},
 		}},
 	}}
 	res, _, err := s.handleRunSequence(context.Background(), nil, infinite)
