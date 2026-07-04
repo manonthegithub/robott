@@ -143,6 +143,10 @@ func DelayedEnqueue(ctx context.Context, q CommandQueue, delay time.Duration, cm
 // internal/sequence
 type Sequencer struct {
     Queue command.CommandQueue
+    Ctx   context.Context // server shutdown context; a running sequence's own
+                           // cancellable context derives from this, so shutdown
+                           // cancels it the same way it cancels everything else
+                           // (falls back to context.Background() if nil)
     // mu, running, cancel — single-slot: only one sequence at a time
 }
 func (s *Sequencer) Start(seq OperationSequence) error // ErrAlreadyRunning if one is running

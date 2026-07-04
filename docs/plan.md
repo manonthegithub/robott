@@ -563,9 +563,54 @@ one place that ever sleeps before enqueuing (never the executor).
 
 ---
 
-**Out of scope for this round (flagged, not building unless wanted):** MCP
-tool exposure for delayed/sequenced commands (component 10's `mcpserver`
-still only wraps the 3 original tools) — would need 1-2 new MCP tools
-(`run_sequence`, `stop_sequence`) mirroring the REST endpoints, same pattern
-as the existing 3. Small addition once the REST side above is solid, but a
-separate call to make since it wasn't asked for explicitly.
+## 16. `internal/mcpserver` — MCP parity for delay_ms + /sequence, /sequence/stop (modifies component 10)
+
+Originally deferred as out of scope for this round; built once a
+post-implementation review flagged that `internal/mcpserver` hadn't been
+touched at all, so an LLM driving the robot via MCP — the actual point of
+this project's pivot — couldn't reach any of components 11-15's new
+capability.
+
+**Steps**
+1. `LedInput`/`StepperInput`/`ServoInput` gain a `delay_ms` field, passed
+   straight through to the corresponding `apigen.*Operation.DelayMs`.
+2. New `internal/mcpserver/sequence_convert.go`: `SequenceStepInput`, a flat
+   recursive struct (MCP's schema reflection can't describe a discriminated
+   `oneOf` the way `openapi.yaml` can), and `RunSequenceInput{Seq
+   []SequenceStepInput}`/`StopSequenceInput{}`. `toGenOperation` converts a
+   `SequenceStepInput` tree into the generated `apigen.Operation` union via
+   its `From<Variant>Operation()` setters — the mirror image of
+   `internal/api/sequence_convert.go`'s `As<Variant>Operation()` usage, same
+   codegen-risk profile.
+3. Two new tools, `run_sequence`/`stop_sequence`, calling `h.PostSequence`/
+   `h.PostSequenceStop` directly (same validation path a REST call gets,
+   nothing duplicated).
+
+**Definition of done**
+- `internal/mcpserver/server_test.go` (package had zero tests before):
+  happy paths for all 5 tools; `delay_ms>0` timing; a validation failure
+  (bad stepper request) surfaces as an `IsError` tool result, not a Go
+  error; servo-out-of-range inside a sequence rejected the same way;
+  an unknown step `type` fails before `PostSequence` is even called (a Go
+  error from the converter, not an `IsError` result); running →
+  `stop_sequence` → no further enqueues.
+- `go build ./... && go test ./...` green on the Pi (same unverified-codegen
+  caveat as components 14-15).
+
+---
+
+## Sequencer shutdown-awareness fix (found in post-implementation review, modifies component 13)
+
+`Sequencer.Start()` derived its cancellable context from `context.Background()`
+unconditionally — never anything tied to server shutdown, unlike the
+`delay_ms>0` single-shot path which correctly threads `Handlers.Ctx` through.
+A sequence running during shutdown would be left permanently parked on
+`EnqueueBlocking` once the executor stopped draining the queue.
+
+**Fix:** `Sequencer` gained a `Ctx context.Context` field; `Start()` derives
+its per-run context from `s.Ctx`, falling back to `context.Background()` if
+nil (so existing callers/tests that don't set it are unaffected).
+`cmd/robottt/main.go` now passes its shutdown `ctx` into the `Sequencer` it
+constructs. New tests in `internal/sequence/sequencer_test.go`: a running
+sequence ends on its own when `Ctx` is cancelled without anyone calling
+`Stop()`, and the nil-`Ctx` fallback still behaves exactly as before.

@@ -55,10 +55,14 @@ func main() {
 	queue := command.NewChannelQueue(cfg.QueueCapacity)
 
 	exec := &executor.Executor{Queue: queue, GPIO: gpio, Servo: servo}
-	seq := &sequence.Sequencer{Queue: queue}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Ctx wired in so a running sequence is cancelled on shutdown too,
+	// instead of being left parked on a queue the stopped executor no
+	// longer drains.
+	seq := &sequence.Sequencer{Queue: queue, Ctx: ctx}
 
 	handlers := &api.Handlers{
 		Queue:         queue,

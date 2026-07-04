@@ -178,6 +178,47 @@ func TestSequencer_StartWhileRunningReturnsErrAlreadyRunning(t *testing.T) {
 	}
 }
 
+func TestSequencer_ShutdownCtxCancelsRunningSequenceWithoutStop(t *testing.T) {
+	// Sequencer.Ctx models the server's shutdown context. A running
+	// sequence must end on its own when Ctx is cancelled, without anyone
+	// calling Stop() — otherwise it's left parked on the queue forever once
+	// whatever drains the queue (the executor) has also stopped.
+	shutdownCtx, shutdown := context.WithCancel(context.Background())
+	defer shutdown()
+
+	drainCtx, cancelDrain := context.WithCancel(context.Background())
+	defer cancelDrain()
+	q := newDrainedQueue(drainCtx, 32)
+	s := &Sequencer{Queue: q, Ctx: shutdownCtx}
+
+	seq := OperationSequence{Seq: []Operation{
+		Loop{Times: 0, Body: []Operation{NewLedCommand(true, 0)}},
+	}}
+	if err := s.Start(seq); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+
+	time.Sleep(20 * time.Millisecond) // let it enqueue a handful of commands
+	shutdown()                        // simulate server shutdown, not Stop()
+
+	waitForCompletion(t, s, time.Second) // must end on its own
+}
+
+func TestSequencer_NilCtxFallsBackToBackgroundLikeBefore(t *testing.T) {
+	// Existing callers (and every other test in this file) construct
+	// Sequencer without setting Ctx — must keep working exactly as before.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q := newDrainedQueue(ctx, 32)
+	s := &Sequencer{Queue: q}
+
+	seq := OperationSequence{Seq: []Operation{NewLedCommand(true, 0)}}
+	if err := s.Start(seq); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	waitForCompletion(t, s, time.Second)
+}
+
 func TestSequencer_StopWithNothingRunningReturnsErrNotRunning(t *testing.T) {
 	s := &Sequencer{Queue: newDrainedQueue(context.Background(), 1)}
 	if err := s.Stop(); !errors.Is(err, ErrNotRunning) {

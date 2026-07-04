@@ -20,8 +20,17 @@ var ErrNotRunning = errors.New("sequence: no sequence is running")
 // CommandQueue. Start validates and launches a sequence in its own
 // goroutine and returns immediately; Stop cancels whichever sequence is
 // currently running.
+//
+// Ctx, if set, is the server's shutdown context: a running sequence's own
+// cancellable context is derived from it, so shutdown cancels an in-flight
+// sequence the same way it cancels everything else in this codebase, rather
+// than leaving its goroutine parked forever on a DelayedEnqueue call against
+// a queue the (now-stopped) executor no longer drains. Falls back to
+// context.Background() if left nil (e.g. existing tests that don't care
+// about shutdown behavior).
 type Sequencer struct {
 	Queue command.CommandQueue
+	Ctx   context.Context
 
 	mu      sync.Mutex
 	running bool
@@ -36,12 +45,17 @@ func (s *Sequencer) Start(seq OperationSequence) error {
 		return err
 	}
 
+	parent := s.Ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
 		return ErrAlreadyRunning
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	s.running = true
 	s.cancel = cancel
 	s.mu.Unlock()

@@ -37,39 +37,52 @@ func (s *Server) HTTPHandler() http.Handler {
 
 // LedInput is the set_led tool's input schema.
 type LedInput struct {
-	On bool `json:"on" jsonschema:"whether to turn the LED on or off"`
+	On      bool `json:"on" jsonschema:"whether to turn the LED on or off"`
+	DelayMs int  `json:"delay_ms,omitempty" jsonschema:"milliseconds to wait before running this; 0 or omitted means immediately"`
 }
 
 // StepperInput is the move_stepper tool's input schema.
 type StepperInput struct {
-	Steps int    `json:"steps" jsonschema:"number of steps to move, must be positive"`
-	Dir   string `json:"dir" jsonschema:"rotation direction, cw or ccw"`
+	Steps   int    `json:"steps" jsonschema:"number of steps to move, must be positive"`
+	Dir     string `json:"dir" jsonschema:"rotation direction, cw or ccw"`
+	DelayMs int    `json:"delay_ms,omitempty" jsonschema:"milliseconds to wait before running this; 0 or omitted means immediately"`
 }
 
 // ServoInput is the set_servo tool's input schema.
 type ServoInput struct {
 	AngleDeg float64 `json:"angle_deg" jsonschema:"target servo angle in degrees"`
+	DelayMs  int     `json:"delay_ms,omitempty" jsonschema:"milliseconds to wait before running this; 0 or omitted means immediately"`
 }
 
 func (s *Server) registerTools(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "set_led",
-		Description: "Turn the robot's LED on or off",
+		Description: "Turn the robot's LED on or off, optionally after a delay",
 	}, s.handleSetLED)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "move_stepper",
-		Description: "Move the robot's stepper motor a number of steps in a direction",
+		Description: "Move the robot's stepper motor a number of steps in a direction, optionally after a delay",
 	}, s.handleMoveStepper)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "set_servo",
-		Description: "Set the robot's servo to an absolute angle in degrees",
+		Description: "Set the robot's servo to an absolute angle in degrees, optionally after a delay",
 	}, s.handleSetServo)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "run_sequence",
+		Description: "Run an ordered list of led/servo/stepper steps and loops (loops repeat their nested body a number of times, or forever if times is 0/omitted) as a background sequence. Only one sequence may run at a time.",
+	}, s.handleRunSequence)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "stop_sequence",
+		Description: "Stop the currently running sequence, if any",
+	}, s.handleStopSequence)
 }
 
 func (s *Server) handleSetLED(ctx context.Context, _ *mcp.CallToolRequest, in LedInput) (*mcp.CallToolResult, any, error) {
-	resp, err := s.handlers.PostLed(ctx, apigen.PostLedRequestObject{Body: &apigen.LedOperation{On: in.On}})
+	resp, err := s.handlers.PostLed(ctx, apigen.PostLedRequestObject{Body: &apigen.LedOperation{On: in.On, DelayMs: &in.DelayMs}})
 	if err != nil {
 		return nil, nil, fmt.Errorf("mcpserver: PostLed: %w", err)
 	}
@@ -78,8 +91,9 @@ func (s *Server) handleSetLED(ctx context.Context, _ *mcp.CallToolRequest, in Le
 
 func (s *Server) handleMoveStepper(ctx context.Context, _ *mcp.CallToolRequest, in StepperInput) (*mcp.CallToolResult, any, error) {
 	resp, err := s.handlers.PostStepper(ctx, apigen.PostStepperRequestObject{Body: &apigen.StepperOperation{
-		Steps: in.Steps,
-		Dir:   apigen.StepperOperationDir(in.Dir),
+		Steps:   in.Steps,
+		Dir:     apigen.StepperOperationDir(in.Dir),
+		DelayMs: &in.DelayMs,
 	}})
 	if err != nil {
 		return nil, nil, fmt.Errorf("mcpserver: PostStepper: %w", err)
@@ -88,11 +102,36 @@ func (s *Server) handleMoveStepper(ctx context.Context, _ *mcp.CallToolRequest, 
 }
 
 func (s *Server) handleSetServo(ctx context.Context, _ *mcp.CallToolRequest, in ServoInput) (*mcp.CallToolResult, any, error) {
-	resp, err := s.handlers.PostServo(ctx, apigen.PostServoRequestObject{Body: &apigen.ServoOperation{AngleDeg: in.AngleDeg}})
+	resp, err := s.handlers.PostServo(ctx, apigen.PostServoRequestObject{Body: &apigen.ServoOperation{AngleDeg: in.AngleDeg, DelayMs: &in.DelayMs}})
 	if err != nil {
 		return nil, nil, fmt.Errorf("mcpserver: PostServo: %w", err)
 	}
 	return renderResult(resp.VisitPostServoResponse)
+}
+
+func (s *Server) handleRunSequence(ctx context.Context, _ *mcp.CallToolRequest, in RunSequenceInput) (*mcp.CallToolResult, any, error) {
+	ops := make([]apigen.Operation, 0, len(in.Seq))
+	for _, step := range in.Seq {
+		op, err := toGenOperation(step)
+		if err != nil {
+			return nil, nil, fmt.Errorf("mcpserver: %w", err)
+		}
+		ops = append(ops, op)
+	}
+
+	resp, err := s.handlers.PostSequence(ctx, apigen.PostSequenceRequestObject{Body: &apigen.SequenceRequest{Seq: ops}})
+	if err != nil {
+		return nil, nil, fmt.Errorf("mcpserver: PostSequence: %w", err)
+	}
+	return renderResult(resp.VisitPostSequenceResponse)
+}
+
+func (s *Server) handleStopSequence(ctx context.Context, _ *mcp.CallToolRequest, _ StopSequenceInput) (*mcp.CallToolResult, any, error) {
+	resp, err := s.handlers.PostSequenceStop(ctx, apigen.PostSequenceStopRequestObject{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("mcpserver: PostSequenceStop: %w", err)
+	}
+	return renderResult(resp.VisitPostSequenceStopResponse)
 }
 
 // renderResult runs a generated response object's Visit method against a
