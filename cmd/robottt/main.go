@@ -21,6 +21,7 @@ import (
 	"robottt/internal/executor"
 	"robottt/internal/hardware/gpiodirect"
 	"robottt/internal/mcpserver"
+	"robottt/internal/sequence"
 )
 
 func main() {
@@ -54,11 +55,20 @@ func main() {
 	queue := command.NewChannelQueue(cfg.QueueCapacity)
 
 	exec := &executor.Executor{Queue: queue, GPIO: gpio, Servo: servo}
+	seq := &sequence.Sequencer{Queue: queue}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	handlers := &api.Handlers{
 		Queue:         queue,
 		ServoMinAngle: cfg.ServoMinAngle,
 		ServoMaxAngle: cfg.ServoMaxAngle,
+		Sequencer:     seq,
+		// Server-lifetime ctx: goroutines spawned for delay_ms>0 single-shot
+		// requests outlive the HTTP request that started them, so they're
+		// scoped to shutdown, not a (by-then-finished) per-request context.
+		Ctx: ctx,
 	}
 
 	// REST API and MCP wrapper share one process/port: MCP calls handlers
@@ -68,9 +78,6 @@ func main() {
 	mux.Handle("/", api.NewRouter(handlers))
 
 	server := &http.Server{Addr: cfg.ListenAddr, Handler: mux}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	go exec.Run(ctx)
 

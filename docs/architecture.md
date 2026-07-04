@@ -4,17 +4,39 @@
 
 ```
 HTTP client
-    │  POST /led {on}
-    │  POST /stepper {steps, dir}
-    │  POST /servo {angle_deg}
+    │  POST /led {on, delay_ms?}
+    │  POST /stepper {steps, dir, delay_ms?}
+    │  POST /servo {angle_deg, delay_ms?}
+    │  POST /sequence {seq: [...]}
+    │  POST /sequence/stop
     ▼
-[api] handlers validate JSON → build Command struct
+[api] handlers validate JSON → build Command / Operation tree
+    │
+    ├─ delay_ms == 0 (or n/a) ────────────────────────────┐
+    │                                                      │
+    ├─ delay_ms > 0 ──► goroutine ──► [command] DelayedEnqueue(delay, cmd)
+    │                                     (sleeps delay, then EnqueueBlocking)
+    │                                                      │
+    └─ POST /sequence ──► [sequence] Sequencer.Start(seq)  │
+                              409 if one already running   │
+                              (single slot, not a registry)│
+                              spawns goroutine: exec()      │
+                              walks the Operation tree,     │
+                              each HardwareCommand leaf ──► toCommand() ──► DelayedEnqueue
+                                                                            │
+       POST /sequence/stop ──► Sequencer.Stop() (cancels ctx; 404 if none)│
+                                                                            ▼
+                                          [command] CommandQueue.Enqueue(cmd)
+                                          ── interface, v1 impl = buffered Go channel;
+                                             Enqueue non-blocking (unchanged), plus
+                                             EnqueueBlocking (blocks on full channel —
+                                             Go's native backpressure — ctx only lets
+                                             a caller interrupt the wait)
     │
     ▼
-[command] CommandQueue.Enqueue(cmd)   ── interface, v1 impl = buffered Go channel
-    │
-    ▼
-[executor] single goroutine, blocking Dequeue loop, serial dispatch
+[executor] single goroutine, blocking Dequeue loop, serial dispatch, always
+           dispatches immediately on Dequeue — the executor never sleeps;
+           DelayedEnqueue above is the only sleep site in the whole system
     │  type switch on Command
     ▼
 [hardware] interfaces: GPIOController / StepperController / ServoController
@@ -25,11 +47,14 @@ HTTP client
 
 Executor selects concrete hardware impl at startup (dependency injection in `main.go`) — swapping direct-Go ↔ MCU-offload means writing a new package satisfying the same 3 interfaces and changing one wiring line, per spec §8.
 
+`internal/sequence` is deliberately independent of `internal/command` — its `Operation`/`Loop`/`OperationSequence` types are pure data with no import of `command`. The one file that bridges the two, `internal/sequence/convert.go`'s `toCommand(HardwareCommand) command.Command`, is the only place that knows both vocabularies, so the operation tree stays reusable/testable without pulling in hardware-dispatch types.
+
 Package layout:
 ```
-cmd/robottt/main.go          — wiring: config → queue → hardware impl → executor → http server
+cmd/robottt/main.go          — wiring: config → queue → hardware impl → executor → sequencer → http server
 internal/api/                — HTTP handlers, router, request/response DTOs
-internal/command/            — Command types, CommandQueue interface + channel impl
+internal/command/            — Command types, CommandQueue interface + channel impl, DelayedEnqueue helper
+internal/sequence/           — Operation/Loop/OperationSequence types, converter, Sequencer
 internal/executor/           — executor loop
 internal/hardware/           — GPIOController / StepperController / ServoController interfaces
 internal/hardware/gpiodirect/— v1 impl: go-gpiocdev + sysfs PWM, runs directly on Pi5
@@ -48,7 +73,7 @@ internal/config/             — pin/config loading from env vars
 
 ## Data models / schemas
 
-**Command types** (internal, `internal/command`):
+**Command types** (internal, `internal/command`) — the executor-facing hardware vocabulary, unchanged by the delay/sequencing work:
 ```go
 type Direction string
 const ( DirCW Direction = "cw"; DirCCW Direction = "ccw" )
@@ -60,25 +85,90 @@ type StepperCommand struct{ Steps int; Dir Direction }
 type ServoCommand struct{ AngleDeg float64 }
 ```
 
+**Operation tree** (internal, `internal/sequence`) — the higher-level "intent" vocabulary a sequence request is built from; independent of `command`, converted to it only at dispatch time:
+```go
+type Operation any
+
+type HardwareCommand interface{ Delay() time.Duration }
+
+type baseHardwareCommand struct{ DelayMs int }
+func (b baseHardwareCommand) Delay() time.Duration { return time.Duration(b.DelayMs) * time.Millisecond }
+
+type LedCommand struct { baseHardwareCommand; On bool }
+type ServoCommand struct { baseHardwareCommand; AngleDeg float64 }
+type StepperCommand struct { baseHardwareCommand; Steps int; Dir string }
+
+type Loop struct { Body []Operation; Times int }  // Times == 0 means infinite
+type OperationSequence struct { Seq []Operation }
+```
+
 **HTTP request/response DTOs:**
 
 | Endpoint | Request JSON | Success response | Error response |
 |---|---|---|---|
-| `POST /led` | `{"on": true}` | `202 {"status":"queued"}` | `400 {"error": "..."}` |
-| `POST /stepper` | `{"steps": 200, "dir": "cw"}` | `202 {"status":"queued"}` | `400`/`503 {"error": "..."}` |
-| `POST /servo` | `{"angle_deg": 90.0}` | `202 {"status":"queued"}` | `400`/`503 {"error": "..."}` |
+| `POST /led` | `{"on": true, "delay_ms": 0}` | `202 {"status":"queued"}` | `400 {"error": "..."}` |
+| `POST /stepper` | `{"steps": 200, "dir": "cw", "delay_ms": 0}` | `202 {"status":"queued"}` | `400`/`503 {"error": "..."}` |
+| `POST /servo` | `{"angle_deg": 90.0, "delay_ms": 0}` | `202 {"status":"queued"}` | `400`/`503 {"error": "..."}` |
+| `POST /sequence` | `{"seq": [Operation, ...]}` | `202 {"status":"queued"}` | `400`/`409 {"error": "..."}` |
+| `POST /sequence/stop` | *(no body)* | `202 {"status":"stopped"}` | `404 {"error": "..."}` |
 
-`202 Accepted` reflects reality: HTTP layer only confirms the command was queued, not executed (executor runs async). No command-status/result endpoint in v1 (non-goal — keep simple).
+`delay_ms` is optional on the 3 existing endpoints, default `0`, meaning "unchanged behavior" — see below.
 
-`503` returned when queue is full (bounded channel, non-blocking enqueue via `select`/`default`) — protects against unbounded memory growth if executor stalls; caller should retry.
+`Operation` (used both as `/sequence`'s array elements and nested inside `LoopOperation.body`) is a discriminated `oneOf` on `type`:
+```yaml
+Operation:
+  oneOf: [LedOperation, ServoOperation, StepperOperation, LoopOperation]
+  discriminator: {propertyName: type}
+```
+`LedOperation`/`ServoOperation`/`StepperOperation` *are* the request schemas for `POST /led`/`/servo`/`/stepper` — there's no separate `LedRequest`/`ServoRequest`/`StepperRequest` alongside them; the standalone endpoints and the sequence leaves share the exact same schema (plus `type` and `delay_ms` on each), single source of truth for each command's fields. `LoopOperation` has `type: "loop"`, `times` (`0` = infinite), and `body: Operation[]`.
+
+`202 Accepted` on `/led`/`/stepper`/`/servo` with `delay_ms==0` reflects reality exactly as before: queued, not executed. With `delay_ms>0`, `202` now means "will be queued after the delay" — the command isn't on the queue yet when the response is sent (see flagged decision #5). `202` on `/sequence` means the sequence goroutine has been started, not that any step has executed yet.
+
+`503` on the 3 existing endpoints is unchanged: returned when queue is full via the original non-blocking `Enqueue`/`select`/`default`, protecting against unbounded memory growth if the executor stalls. `/sequence` never returns `503` — it uses `EnqueueBlocking` internally instead (see below), so a full queue backpressures the sequence rather than rejecting the request; `/sequence` returns `409` instead, when a sequence is already running.
 
 ## Interfaces / contracts
 
 ```go
 // internal/command
 type CommandQueue interface {
-    Enqueue(cmd Command) error          // non-blocking; ErrQueueFull if full
-    Dequeue(ctx context.Context) (Command, error) // blocks until cmd or ctx done
+    Enqueue(cmd Command) error                             // non-blocking; ErrQueueFull if full
+    EnqueueBlocking(ctx context.Context, cmd Command) error // blocks until space or ctx done
+    Dequeue(ctx context.Context) (Command, error)           // blocks until cmd or ctx done
+}
+
+// DelayedEnqueue is the single shared helper that ever sleeps before enqueuing —
+// used by the delay_ms>0 single-shot path and by the Sequencer, never by the executor.
+func DelayedEnqueue(ctx context.Context, q CommandQueue, delay time.Duration, cmd Command) error
+
+// internal/sequence
+type Sequencer struct {
+    Queue command.CommandQueue
+    // mu, running, cancel — single-slot: only one sequence at a time
+}
+func (s *Sequencer) Start(seq OperationSequence) error // ErrAlreadyRunning if one is running
+func (s *Sequencer) Stop() error                       // ErrNotRunning if none running
+
+// the recursive walker, one goroutine per Start(), no separate "list" node type
+// needed since Loop.Body / OperationSequence.Seq are already []Operation
+func (s *Sequencer) exec(ctx context.Context, ops []Operation) error {
+    for _, op := range ops {
+        if ctx.Err() != nil {
+            return ctx.Err()
+        }
+        switch o := op.(type) {
+        case Loop:
+            for i := 0; o.Times == 0 || i < o.Times; i++ {
+                if err := s.exec(ctx, o.Body); err != nil {
+                    return err
+                }
+            }
+        case HardwareCommand:
+            if err := command.DelayedEnqueue(ctx, s.Queue, o.Delay(), toCommand(o)); err != nil {
+                return err
+            }
+        }
+    }
+    return nil
 }
 
 // internal/hardware
@@ -96,7 +186,7 @@ type ServoController interface {
 }
 ```
 
-`main.go` wires one concrete impl of each into the `Executor`. `gpiodirect` package provides the v1 impl of all three; a future `mcu` package would provide the same three interfaces, wired in with no changes to `api`, `command`, or `executor` packages.
+`main.go` wires one concrete impl of each hardware interface into the `Executor`, plus one `Sequencer` sharing the same `CommandQueue`. `gpiodirect` package provides the v1 impl of all three hardware controllers; a future `mcu` package would provide the same three interfaces, wired in with no changes to `api`, `command`, `sequence`, or `executor` packages.
 
 ## External dependencies
 
@@ -115,3 +205,9 @@ type ServoController interface {
 
 3. **Sysfs-based hand-rolled PWM wrapper for servo.**
    Sysfs PWM interface is being deprecated in newer kernels in favor of char-device based control in some contexts; Pi5's actual current kernel support should be verified on real hardware before committing. If sysfs PWM proves unavailable/unstable on target Pi5 OS image, fallback is software PWM (already anticipated as swappable impl per spec §6).
+
+4. **`EnqueueBlocking` backpressure means a stalled sequence can block indefinitely** if the queue never drains (e.g. executor stuck on a long stepper move). Acceptable since it's bounded by `ctx` — `Stop()` always works — and it's the same "serial executor is the hardware mutex" tradeoff already accepted in decision #2 above.
+
+5. **Single-shot `delay_ms>0` responds `202` before the command is actually enqueued.** Previously `202` meant "on the queue now"; a delayed single command shifts that to "will be queued after the delay." Worth a doc/spec note so callers don't assume immediate queueing.
+
+6. **Only one sequence can run at a time — a second `POST /sequence` gets `409`, not queued to run after the first finishes.** Simplest option and matches the spec as given; if "queue the next sequence" is wanted later that's a bigger change (a wait-queue, not just a single slot) and should be scoped separately.

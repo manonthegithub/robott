@@ -21,6 +21,21 @@ func (q *ChannelQueue) Enqueue(cmd Command) error {
 	}
 }
 
+func (q *ChannelQueue) EnqueueBlocking(ctx context.Context, cmd Command) error {
+	// Checked separately (not just as a select case) so an already-cancelled
+	// ctx always wins deterministically, even if the channel currently has
+	// room — select would otherwise pick randomly between two ready cases.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case q.ch <- cmd:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (q *ChannelQueue) Dequeue(ctx context.Context) (Command, error) {
 	select {
 	case cmd := <-q.ch:

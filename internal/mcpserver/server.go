@@ -69,7 +69,7 @@ func (s *Server) registerTools(server *mcp.Server) {
 }
 
 func (s *Server) handleSetLED(ctx context.Context, _ *mcp.CallToolRequest, in LedInput) (*mcp.CallToolResult, any, error) {
-	resp, err := s.handlers.PostLed(ctx, apigen.PostLedRequestObject{Body: &apigen.LedRequest{On: in.On}})
+	resp, err := s.handlers.PostLed(ctx, apigen.PostLedRequestObject{Body: &apigen.LedOperation{On: in.On}})
 	if err != nil {
 		return nil, nil, fmt.Errorf("mcpserver: PostLed: %w", err)
 	}
@@ -77,9 +77,9 @@ func (s *Server) handleSetLED(ctx context.Context, _ *mcp.CallToolRequest, in Le
 }
 
 func (s *Server) handleMoveStepper(ctx context.Context, _ *mcp.CallToolRequest, in StepperInput) (*mcp.CallToolResult, any, error) {
-	resp, err := s.handlers.PostStepper(ctx, apigen.PostStepperRequestObject{Body: &apigen.StepperRequest{
+	resp, err := s.handlers.PostStepper(ctx, apigen.PostStepperRequestObject{Body: &apigen.StepperOperation{
 		Steps: in.Steps,
-		Dir:   apigen.StepperRequestDir(in.Dir),
+		Dir:   apigen.StepperOperationDir(in.Dir),
 	}})
 	if err != nil {
 		return nil, nil, fmt.Errorf("mcpserver: PostStepper: %w", err)
@@ -88,7 +88,7 @@ func (s *Server) handleMoveStepper(ctx context.Context, _ *mcp.CallToolRequest, 
 }
 
 func (s *Server) handleSetServo(ctx context.Context, _ *mcp.CallToolRequest, in ServoInput) (*mcp.CallToolResult, any, error) {
-	resp, err := s.handlers.PostServo(ctx, apigen.PostServoRequestObject{Body: &apigen.ServoRequest{AngleDeg: in.AngleDeg}})
+	resp, err := s.handlers.PostServo(ctx, apigen.PostServoRequestObject{Body: &apigen.ServoOperation{AngleDeg: in.AngleDeg}})
 	if err != nil {
 		return nil, nil, fmt.Errorf("mcpserver: PostServo: %w", err)
 	}

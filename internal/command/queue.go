@@ -17,6 +17,12 @@ type CommandQueue interface {
 	// has no free capacity.
 	Enqueue(cmd Command) error
 
+	// EnqueueBlocking adds cmd, waiting for free capacity if the queue is
+	// full, until ctx is done. The wait itself is just the underlying
+	// channel send blocking (Go's native backpressure); ctx exists so a
+	// caller (e.g. a cancelled sequence) can interrupt the wait.
+	EnqueueBlocking(ctx context.Context, cmd Command) error
+
 	// Dequeue blocks until a command is available or ctx is done.
 	Dequeue(ctx context.Context) (Command, error)
 }

@@ -269,3 +269,303 @@ again.
   exact API surface for `mcp.NewStreamableHTTPHandler` (previously verified
   for `mcp.NewServer`/`mcp.AddTool`/stdio transport in the earlier round) —
   expect a possible fix-up round once built on the Pi.
+
+---
+
+## Constraint for components 11-15: no local Go toolchain
+
+Same situation as every prior component (see `docs/progress.md`): written and
+reviewed here, built/tested/fixed on the Pi. One extra wrinkle this round —
+`internal/api/gen/server.gen.go` isn't even present in this checkout (it's a
+`go:generate` output, not committed in the current tree), so there is nothing
+to inspect locally to confirm oapi-codegen's exact output shape for anything
+new added to `openapi.yaml`.
+
+That's a low-risk bet for the `delay_ms` additions (plain optional int field,
+identical pattern to `on`/`steps`/`angle_deg` already in the spec). It's a
+real risk for the discriminated recursive `oneOf` (the `Operation` shape in
+`docs/architecture.md`) — oapi-codegen's `oneOf`+`discriminator` support is a
+known rough edge, and it can't be confirmed against real output here. An
+earlier draft of this doc hedged that away with a flat tagged struct instead
+of a real union — reverted per explicit direction to keep the `oneOf` design
+discussed from the start. oapi-codegen's documented pattern for a `oneOf`
+with a `discriminator` generates a union type with a `Discriminator() (string,
+error)` method plus `As<Variant>()`/`From<Variant>()`/`Merge<Variant>()`
+accessors backed by `json.RawMessage`, rather than plain struct fields —
+component 14's mapper is written against that pattern. If oapi-codegen v2.4.1
+actually generates something different, that mapper is the one place to fix,
+not the domain hierarchy in `internal/sequence` (still untouched either way).
+
+---
+
+## 11. `internal/command` — `EnqueueBlocking` + `DelayedEnqueue` (modifies component 1)
+
+Motivation: `docs/architecture.md` "Delayed and sequenced commands" — both the
+`delay_ms` on single-shot endpoints and the sequencer need "sleep, then get
+onto the queue, but let a caller cancel while waiting." One shared helper,
+one place that ever sleeps before enqueuing (never the executor).
+
+**Steps**
+1. Add `EnqueueBlocking(ctx context.Context, cmd Command) error` to the
+   `CommandQueue` interface.
+2. Implement on `ChannelQueue`: `select { case ch <- cmd: return nil; case
+   <-ctx.Done(): return ctx.Err() }` — no `default`, so it blocks on a full
+   channel (Go's native backpressure, no extra logic needed for that part);
+   `ctx` exists only so a caller can interrupt the wait.
+3. Add `DelayedEnqueue(ctx context.Context, q CommandQueue, delay
+   time.Duration, cmd Command) error`: if `delay > 0`, `select` on
+   `time.After(delay)` / `ctx.Done()` first, then call `EnqueueBlocking`.
+
+**Inputs/outputs/side effects**
+- No new side effects beyond existing in-memory channel state.
+
+**Error cases**
+- `ctx` cancelled while blocked on send → returns `ctx.Err()`, caller (delayed
+  single-shot goroutine or sequencer) treats as abort, not a crash.
+- `ctx` cancelled during the delay sleep → same, returns before ever touching
+  the queue.
+
+**Definition of done**
+- Unit tests: `EnqueueBlocking` on a full channel blocks until either space
+  frees up (unblocks, no error) or `ctx` is cancelled (returns `ctx.Err()`,
+  doesn't leak a goroutine). `DelayedEnqueue` with `delay=0` enqueues
+  immediately (no measurable sleep); with `delay>0` enqueues only after
+  approximately that duration; cancelling `ctx` mid-delay returns early
+  without enqueuing.
+- **Tricky edge cases:** `EnqueueBlocking` on a queue with free capacity
+  returns immediately (doesn't accidentally wait). `ctx` already cancelled
+  *before* the call (not just cancelled mid-wait) — returns `ctx.Err()`
+  immediately, never attempts the send. Race between space freeing up and
+  `ctx` being cancelled at (approximately) the same instant — either outcome
+  (sent, or `ctx.Err()`) is acceptable, test asserts it's one or the other,
+  never a panic/hang/double-send. `DelayedEnqueue` with a negative `delay`
+  (shouldn't happen if callers validate first, but the helper itself must not
+  hang — treat as `delay<=0`, no sleep).
+
+---
+
+## 12. `internal/sequence` — Operation tree + converter
+
+**Steps**
+1. `operation.go`: `Operation any`; `HardwareCommand` interface
+   (`Delay() time.Duration`); `baseHardwareCommand{DelayMs int}`;
+   `LedCommand`/`ServoCommand`/`StepperCommand` (embed
+   `baseHardwareCommand` + their own fields); `Loop{Body []Operation, Times
+   int}` (`Times == 0` = infinite); `OperationSequence{Seq []Operation}`.
+   No import of `internal/command` in this file.
+2. `convert.go`: `toCommand(HardwareCommand) command.Command`, type-switches
+   over the 3 concrete types, `panic`s on an unrecognized type (defensive —
+   should be unreachable if construction is only ever done from the
+   validated wire format, per component 14).
+3. `validate.go`: `validate(seq []Operation, depth int) error` — rejects
+   unknown/zero-value operations, `Loop.Times < 0`, `Loop` with an empty
+   `Body` (a `Times==0`/infinite loop with nothing in it is a silent
+   busy-spin, not a no-op — reject it rather than let it burn CPU forever),
+   `HardwareCommand.Delay() < 0`, `StepperCommand.Dir` not `"cw"`/`"ccw"`,
+   and nesting deeper than a named constant `MaxDepth` (e.g. 5). Reused by
+   `toCommand`'s assumption of well-formed input.
+
+**Inputs/outputs/side effects**
+- Pure data + pure functions, no I/O.
+
+**Error cases**
+- Covered by `validate` — see steps above; `toCommand` panics only on a
+  construction bug elsewhere in the codebase, not on user input (input is
+  validated before any `Operation` tree is built).
+
+**Definition of done**
+- Table-driven unit tests for `validate`: every rejection case above, plus
+  the happy path (a tree shaped like the architecture doc's example)
+  passing. Unit tests for `toCommand`: each concrete type maps to the
+  expected `command.Command` value.
+- **Tricky edge cases:** empty top-level `Seq` (`[]Operation{}`) is valid (a
+  sequence that does nothing, completes immediately — different from an
+  empty `Loop.Body`, which is rejected because it would spin). `Loop.Times ==
+  1` behaves identically to no loop at all (`Body` runs exactly once) — exact
+  boundary between "loop" and "list" semantics. Nesting exactly at
+  `MaxDepth` passes, `MaxDepth+1` fails (off-by-one on the boundary, not
+  "roughly right"). A `Loop` nested inside a `Loop` nested inside a `Loop`
+  (finite, small counts) validates and executes correctly, not just one level
+  of nesting.
+
+---
+
+## 13. `internal/sequence` — `Sequencer` engine
+
+**Steps**
+1. `Sequencer` struct: `Queue command.CommandQueue`, `mu sync.Mutex`,
+   `running bool`, `cancel context.CancelFunc`.
+2. `Start(seq OperationSequence) error`: under `mu`, if `running` return a
+   sentinel `ErrAlreadyRunning`; else validate the tree (component 12),
+   create a cancellable `context.Context`, set `running = true`, spawn
+   `go s.run(ctx, seq.Seq)`, return `nil` immediately (caller doesn't wait
+   for the sequence to finish).
+3. `run(ctx, ops)`: calls `exec(ctx, ops)`, then under `mu` sets `running =
+   false` regardless of outcome, logs the outcome (completed / cancelled /
+   aborted-on-queue-error).
+4. `exec(ctx, ops []Operation) error`: the recursive walker from the
+   architecture doc — `Loop` repeats `exec` on `Body` `Times` times (or
+   forever), `HardwareCommand` converts + calls `command.DelayedEnqueue`;
+   checks `ctx.Err()` at the top of every loop iteration so an infinite loop
+   actually stops within one iteration of being cancelled, not just between
+   top-level steps.
+5. `Stop() error`: under `mu`, if not `running` return `ErrNotRunning`; else
+   call `cancel()`, return `nil` (doesn't block waiting for the goroutine to
+   actually finish unwinding — `running` flips to `false` asynchronously in
+   `run`).
+
+**Inputs/outputs/side effects**
+- Side effect: commands land on the shared `CommandQueue`, same as any other
+  producer.
+
+**Error cases**
+- `Start` while already running → `ErrAlreadyRunning` (HTTP layer maps to
+  `409`).
+- `Stop` while nothing running → `ErrNotRunning` (HTTP layer maps to `404`).
+- Queue error (`ctx` cancelled mid-`DelayedEnqueue`) → `exec` returns early,
+  sequence ends, logged — not surfaced to any caller since `Start` already
+  returned.
+
+**Definition of done**
+- Unit tests with a fake `CommandQueue` and an injectable clock/sleep seam:
+  ordering of enqueued commands matches a nested example tree; finite loop
+  enqueues exactly `Times × len(Body)` commands; infinite loop stopped via
+  `Stop()` enqueues no more commands within one tick after cancellation;
+  `Start` called twice returns `ErrAlreadyRunning` on the second call and
+  does not disturb the first sequence; `Stop` with nothing running returns
+  `ErrNotRunning`; a `CommandQueue` that blocks forever on `EnqueueBlocking`
+  is unblocked and the sequence ends when `Stop()` is called mid-wait.
+- **Tricky edge cases:** `Stop()` called twice in a row — second call returns
+  `ErrNotRunning`, doesn't panic on a nil/already-cancelled `cancel` func.
+  After a sequence finishes on its own (not stopped), `running` correctly
+  flips back to `false` so a *new* `Start()` immediately after succeeds
+  (rather than staying wrongly locked in "running"). `Start()` right after
+  the *previous* sequence's goroutine has been cancelled but hasn't yet
+  finished unwinding its current `DelayedEnqueue` call — must not allow two
+  goroutines writing to the queue concurrently under the single-slot
+  guarantee (the mutex around `running`/`cancel` needs to cover this, not
+  just the initial check). An infinite loop with `delay_ms: 0` on every leaf
+  hammers `EnqueueBlocking` as fast as the queue drains — confirm this is
+  bounded by the queue's own backpressure (CPU-bound but not runaway memory),
+  not a new failure mode to guard against.
+
+---
+
+## 14. `internal/api` — `delay_ms` on existing endpoints + `/sequence`, `/sequence/stop` (modifies components 5/8)
+
+**Steps**
+1. `openapi.yaml`: rename `LedRequest`/`StepperRequest`/`ServoRequest` to
+   `LedOperation`/`StepperOperation`/`ServoOperation` outright and add `type`
+   (enum of one literal each) plus `delay_ms` (integer, minimum 0, default 0)
+   directly onto each — no `allOf` wrapper, no separate `*Request` schema
+   alongside it. The standalone `/led`/`/stepper`/`/servo` endpoints and the
+   sequence leaves now point at literally the same schema, so a command's
+   fields are defined exactly once. Add `LoopOperation` (`type: loop`,
+   `times` [0 = infinite], `body: Operation[]`, `minItems: 1`). Add
+   `Operation` as the `oneOf` over all four with a `discriminator` on `type`.
+   Add `SequenceRequest{seq: Operation[]}`. Add paths `POST /sequence`
+   (request `SequenceRequest`, responses `202 {"status":"queued"}` / `400` /
+   `409` / `500`) and `POST /sequence/stop` (no body, responses `202
+   {"status":"stopped"}` / `404` / `500`). Note: `type` is schema-`required`
+   on `LedOperation`/`ServoOperation`/`StepperOperation` now even for
+   standalone use (proper discriminator practice) — this is documentation
+   only, same as every other "required" JSON Schema constraint in this spec
+   (see component 8's decision note); nothing enforces it at runtime, so
+   existing standalone `/led`/`/stepper`/`/servo` callers that never send
+   `type` are unaffected.
+2. Regenerate via existing `//go:generate` (`oapi-codegen`) — same
+   `strict-server`/`std-http-server` generators as component 8, no config
+   change. Expect the discriminated `oneOf` to generate a union type
+   (`Operation.Discriminator()`, `AsLedOperation()`/`AsServoOperation()`/
+   `AsStepperOperation()`/`AsLoopOperation()` backed by `json.RawMessage`)
+   rather than plain struct fields — see the codegen-risk note above.
+3. `handlers.go`: `PostLed`/`PostStepper`/`PostServo` — if `delay_ms == 0`,
+   unchanged synchronous `Enqueue` path; if `> 0`, respond `202` immediately
+   and spawn a goroutine calling `command.DelayedEnqueue` with a
+   server-lifetime `context.Context` (so it's cancelled on shutdown, not
+   per-request). Add `PostSequence`/`PostSequenceStop` calling into a
+   `Sequencer` field added to `Handlers`, mapping `ErrAlreadyRunning` → `409`,
+   `ErrNotRunning` → `404`. New file `sequence_convert.go`: `toOperation(op
+   apigen.Operation) (sequence.Operation, error)` calls `op.Discriminator()`
+   then the matching `op.As<Variant>Operation()` accessor, recursively
+   mapping into the `sequence.Operation`/`Loop` hierarchy, doing the same
+   per-field validation the other 3 handlers already do inline (servo range
+   via `h.ServoMinAngle`/`MaxAngle`, stepper `steps>0`/`dir` enum, via the
+   same `command.Direction(...)` cast rather than referencing generated enum
+   consts) so a servo step *inside* a sequence is checked exactly as strictly
+   as a standalone `POST /servo` — this is the one place the generated union
+   type and domain-hierarchy construction meet, kept small and isolated on
+   purpose.
+4. `router.go`: no structural change — new operations flow through the same
+   generated strict-server registration.
+
+**Inputs/outputs/side effects**
+- Delayed single-shot commands and running sequences outlive the HTTP
+  request that started them (spawned goroutines / the `Sequencer`'s own
+  goroutine) — the request/response cycle no longer brackets the full
+  lifetime of the side effect for these cases, unlike the `delay_ms==0` /
+  existing-4-endpoint behavior.
+
+**Error cases**
+- Same `400`/`503`/`500` cases as components 5/8 for the 3 existing
+  endpoints, now also covering `delay_ms < 0` (schema `minimum: 0` plus a
+  code-level check, same "enforced in code, not just schema" pattern already
+  used for `steps`/`dir`).
+- `/sequence`: `400` on a tree that fails `sequence.validate` (unknown type,
+  bad nesting, negative delay/times), `409` on `ErrAlreadyRunning`.
+- `/sequence/stop`: `404` on `ErrNotRunning`.
+
+**Definition of done**
+- `go generate ./...` produces updated `server.gen.go`.
+- httptest unit tests: `delay_ms==0` on all 3 existing endpoints — unchanged
+  behavior (regression coverage). `delay_ms>0` — `202` returned before the
+  command reaches a test double's queue, command appears on the queue only
+  after the delay elapses (using a short test delay + fake clock/queue, not
+  a real multi-second sleep). `/sequence` happy path — nested tree example
+  from the architecture doc round-trips to the expected sequence of enqueued
+  commands. `/sequence` while already running → `409`. `/sequence/stop` with
+  none running → `404`; with one running → `202` and no further commands
+  enqueued afterward.
+- **Tricky edge cases:** a `{"type":"servo","angle_deg":999}` nested inside a
+  `loop` is rejected with `400` exactly like a standalone out-of-range
+  `POST /servo` would be — proves the mapper isn't a looser validation path
+  than the direct endpoints. An unrecognized `type` value (one not in the
+  discriminator mapping) → `400` via the mapper's own error, not a panic.
+  `delay_ms` omitted entirely (not just `0`) on a single-shot request —
+  JSON-omitted optional field behaves identically to explicit `0` (unchanged
+  sync path), since a caller (especially an LLM generating JSON) may omit
+  rather than send `0`; the same applies to `on` omitted inside a `led`
+  operation — with fields merged via `allOf` rather than nested under a
+  sub-object, an omitted `on` decodes as `false` (a valid, meaningful
+  command), not a mismatched-payload error the way it would if the fields
+  were nested under a separate object. Malformed/oversized `/sequence` body
+  (e.g. deeply nested JSON crafted to exceed `MaxDepth` before validation
+  even walks it) still rejected cleanly — covered by the existing
+  body-size-limit middleware from component 8 plus `sequence.validate`'s
+  depth check.
+
+---
+
+## 15. `cmd/robottt/main.go` — wire `Sequencer` (modifies component 7)
+
+**Steps**
+1. Construct one `*sequence.Sequencer{Queue: queue}` alongside the existing
+   `ChannelQueue`/`Executor` construction, pass it into `api.Handlers`.
+2. No new config/env vars needed — `Sequencer` only needs the already-
+   constructed `CommandQueue`.
+
+**Definition of done**
+- `go build ./... && go test ./...` green.
+- Manual smoke test on Pi5: `POST /sequence` with a small finite loop moves
+  LED/servo in the expected order; `POST /sequence` with `times: 0`
+  (infinite) followed by `POST /sequence/stop` actually stops it; a second
+  concurrent `POST /sequence` while one is running gets `409`.
+
+---
+
+**Out of scope for this round (flagged, not building unless wanted):** MCP
+tool exposure for delayed/sequenced commands (component 10's `mcpserver`
+still only wraps the 3 original tools) — would need 1-2 new MCP tools
+(`run_sequence`, `stop_sequence`) mirroring the REST endpoints, same pattern
+as the existing 3. Small addition once the REST side above is solid, but a
+separate call to make since it wasn't asked for explicitly.

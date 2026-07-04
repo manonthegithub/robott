@@ -17,7 +17,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/LedRequest'
+              $ref: '#/components/schemas/LedOperation'
       responses:
         '202':
           $ref: '#/components/responses/Queued'
@@ -36,7 +36,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/StepperRequest'
+              $ref: '#/components/schemas/StepperOperation'
       responses:
         '202':
           $ref: '#/components/responses/Queued'
@@ -55,7 +55,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ServoRequest'
+              $ref: '#/components/schemas/ServoOperation'
       responses:
         '202':
           $ref: '#/components/responses/Queued'
@@ -65,19 +65,67 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/QueueFull'
+  /sequence:
+    post:
+      operationId: postSequence
+      summary: Start a sequence of commands and loops
+      description: >
+        Runs seq as a background sequence: leaf steps are enqueued (after
+        their own delay_ms) in order, loop steps repeat their nested body
+        times times (or forever if times is 0/omitted). Only one sequence
+        may run at a time; starting one while another is running returns
+        409. A full command queue backpressures the sequence rather than
+        rejecting the request (unlike /led, /stepper, /servo).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SequenceRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/Queued'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /sequence/stop:
+    post:
+      operationId: postSequenceStop
+      summary: Stop the currently running sequence, if any
+      responses:
+        '202':
+          $ref: '#/components/responses/Stopped'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
 
 components:
   schemas:
-    LedRequest:
+    LedOperation:
       type: object
-      required: [on]
+      required: [type, on]
       properties:
+        type:
+          type: string
+          enum: [led]
         on:
           type: boolean
-    StepperRequest:
+        delay_ms:
+          type: integer
+          minimum: 0
+          default: 0
+          description: Milliseconds to wait before enqueuing. 0 (default) means the existing synchronous behavior (queued before the response is sent).
+    StepperOperation:
       type: object
-      required: [steps, dir]
+      required: [type, steps, dir]
       properties:
+        type:
+          type: string
+          enum: [stepper]
         steps:
           type: integer
           minimum: 1
@@ -86,14 +134,66 @@ components:
           type: string
           enum: [cw, ccw]
           description: Enforced in code, not just schema (see docs/plan.md component 8 decision note).
-    ServoRequest:
+        delay_ms:
+          type: integer
+          minimum: 0
+          default: 0
+          description: Milliseconds to wait before enqueuing. 0 (default) means the existing synchronous behavior (queued before the response is sent).
+    ServoOperation:
       type: object
-      required: [angle_deg]
+      required: [type, angle_deg]
       properties:
+        type:
+          type: string
+          enum: [servo]
         angle_deg:
           type: number
           format: double
           description: Must fall within the server's configured servo angle range (checked in code, range is runtime config, not a schema constant).
+        delay_ms:
+          type: integer
+          minimum: 0
+          default: 0
+          description: Milliseconds to wait before enqueuing. 0 (default) means the existing synchronous behavior (queued before the response is sent).
+    LoopOperation:
+      type: object
+      required: [type, body]
+      properties:
+        type:
+          type: string
+          enum: [loop]
+        times:
+          type: integer
+          minimum: 0
+          default: 0
+          description: Number of repetitions; 0 (default) means infinite (runs until /sequence/stop).
+        body:
+          type: array
+          minItems: 1
+          description: Nested operations to repeat. Enforced non-empty in code (see docs/plan.md component 12's ErrEmptyLoopBody).
+          items:
+            $ref: '#/components/schemas/Operation'
+    Operation:
+      oneOf:
+        - $ref: '#/components/schemas/LedOperation'
+        - $ref: '#/components/schemas/ServoOperation'
+        - $ref: '#/components/schemas/StepperOperation'
+        - $ref: '#/components/schemas/LoopOperation'
+      discriminator:
+        propertyName: type
+        mapping:
+          led: '#/components/schemas/LedOperation'
+          servo: '#/components/schemas/ServoOperation'
+          stepper: '#/components/schemas/StepperOperation'
+          loop: '#/components/schemas/LoopOperation'
+    SequenceRequest:
+      type: object
+      required: [seq]
+      properties:
+        seq:
+          type: array
+          items:
+            $ref: '#/components/schemas/Operation'
     QueuedResponse:
       type: object
       required: [status]
@@ -101,6 +201,13 @@ components:
         status:
           type: string
           example: queued
+    StoppedResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: stopped
     ErrorResponse:
       type: object
       required: [error]
@@ -115,6 +222,12 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/QueuedResponse'
+    Stopped:
+      description: The running sequence was stopped
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/StoppedResponse'
     BadRequest:
       description: Request failed validation
       content:
@@ -123,6 +236,18 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     QueueFull:
       description: Command queue has no free capacity, retry later
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: A sequence is already running
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: No sequence is currently running
       content:
         application/json:
           schema:
