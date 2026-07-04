@@ -24,6 +24,10 @@ func (q *fakeQueue) Enqueue(cmd command.Command) error {
 	return nil
 }
 
+func (q *fakeQueue) EnqueueBlocking(_ context.Context, cmd command.Command) error {
+	return q.Enqueue(cmd)
+}
+
 func (q *fakeQueue) Dequeue(ctx context.Context) (command.Command, error) {
 	q.mu.Lock()
 	if len(q.cmds) > 0 {
