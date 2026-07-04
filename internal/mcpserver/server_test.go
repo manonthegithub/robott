@@ -238,6 +238,57 @@ func TestHandleRunSequence_ServoOutOfRangeIsErrorResult(t *testing.T) {
 	}
 }
 
+func TestHandleRunSequence_ParHappyPath(t *testing.T) {
+	q := &fakeQueue{}
+	s := newTestServer(q)
+
+	in := RunSequenceInput{Seq: []SequenceStepInput{
+		{Type: "par", Branches: [][]any{
+			{map[string]any{"type": "led", "on": true}},
+			{map[string]any{"type": "servo", "angle_deg": 90.0}},
+		}},
+	}}
+
+	res, _, err := s.handleRunSequence(context.Background(), nil, in)
+	if err != nil {
+		t.Fatalf("handleRunSequence() error = %v, want nil", err)
+	}
+	if res.IsError {
+		t.Fatalf("handleRunSequence() result is an error: %s", resultText(t, res))
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && len(q.snapshot()) < 2 {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if got := q.snapshot(); len(got) != 2 {
+		t.Fatalf("enqueued = %v, want 2 commands (one per branch)", got)
+	}
+}
+
+func TestHandleRunSequence_ParServoOutOfRangeInBranchIsErrorResult(t *testing.T) {
+	q := &fakeQueue{}
+	s := newTestServer(q)
+
+	in := RunSequenceInput{Seq: []SequenceStepInput{
+		{Type: "par", Branches: [][]any{
+			{map[string]any{"type": "led", "on": true}},
+			{map[string]any{"type": "servo", "angle_deg": 999.0}},
+		}},
+	}}
+
+	res, _, err := s.handleRunSequence(context.Background(), nil, in)
+	if err != nil {
+		t.Fatalf("handleRunSequence() error = %v, want nil", err)
+	}
+	if !res.IsError {
+		t.Fatalf("handleRunSequence() with out-of-range angle in a branch result.IsError = false, want true: %s", resultText(t, res))
+	}
+	if got := q.snapshot(); len(got) != 0 {
+		t.Fatalf("enqueued = %v, want none", got)
+	}
+}
+
 func TestHandleRunSequence_UnknownStepTypeReturnsGoError(t *testing.T) {
 	q := &fakeQueue{}
 	s := newTestServer(q)

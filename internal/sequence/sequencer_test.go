@@ -270,6 +270,93 @@ func TestSequencer_RestartAfterNaturalCompletionSucceeds(t *testing.T) {
 	waitForCompletion(t, s, time.Second)
 }
 
+func TestSequencer_ParBranchesRaceIndependently(t *testing.T) {
+	// Branch A's command has a longer delay than branch B's — if branches
+	// really run concurrently (not one after the other), branch B's command
+	// must arrive on the queue first despite being listed second.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q := newDrainedQueue(ctx, 32)
+	s := &Sequencer{Queue: q}
+
+	seq := OperationSequence{Seq: []Operation{
+		Par{Branches: [][]Operation{
+			{NewLedCommand(true, 150)},   // branch A: slower
+			{NewServoCommand(90, 10)},    // branch B: faster, listed second
+		}},
+	}}
+	if err := s.Start(seq); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	waitForCompletion(t, s, time.Second)
+
+	got := q.snapshot()
+	if len(got) != 2 {
+		t.Fatalf("got %d commands, want 2: %v", len(got), got)
+	}
+	if got[0] != command.Command(command.ServoCommand{AngleDeg: 90}) {
+		t.Fatalf("first command = %v, want the faster branch's ServoCommand (proves branches ran concurrently, not in list order)", got[0])
+	}
+}
+
+func TestSequencer_ParJoinsBeforeContinuing(t *testing.T) {
+	// A step after the Par must not run until *all* branches finish, not
+	// just the fastest one.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q := newDrainedQueue(ctx, 32)
+	s := &Sequencer{Queue: q}
+
+	const slowDelay = 150 * time.Millisecond
+	seq := OperationSequence{Seq: []Operation{
+		Par{Branches: [][]Operation{
+			{NewLedCommand(true, int(slowDelay.Milliseconds()))},
+			{NewServoCommand(90, 10)},
+		}},
+		NewServoCommand(0, 0), // must wait for the slow branch
+	}}
+	start := time.Now()
+	if err := s.Start(seq); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	waitForCompletion(t, s, time.Second)
+
+	got := q.snapshot()
+	if len(got) != 3 {
+		t.Fatalf("got %d commands, want 3: %v", len(got), got)
+	}
+	if got[2] != command.Command(command.ServoCommand{AngleDeg: 0}) {
+		t.Fatalf("last command = %v, want the post-Par ServoCommand{AngleDeg:0}", got[2])
+	}
+	if elapsed := time.Since(start); elapsed < slowDelay {
+		t.Fatalf("post-Par step arrived after %v, want at least %v (must wait for the slow branch)", elapsed, slowDelay)
+	}
+}
+
+func TestSequencer_ParStoppedMidBranchesEndsCleanly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q := newDrainedQueue(ctx, 32)
+	s := &Sequencer{Queue: q}
+
+	seq := OperationSequence{Seq: []Operation{
+		Par{Branches: [][]Operation{
+			{Loop{Times: 0, Body: []Operation{NewLedCommand(true, 0)}}},
+			{Loop{Times: 0, Body: []Operation{NewServoCommand(90, 0)}}},
+		}},
+	}}
+	if err := s.Start(seq); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	if err := s.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v, want nil", err)
+	}
+	waitForCompletion(t, s, time.Second) // must not hang waiting on either branch
+}
+
 func TestSequencer_StartRejectsInvalidSequence(t *testing.T) {
 	s := &Sequencer{Queue: command.NewChannelQueue(1)}
 	seq := OperationSequence{Seq: []Operation{

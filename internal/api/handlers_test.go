@@ -297,6 +297,66 @@ func TestHandleSequence_ServoOutOfRangeInsideSequenceRejected(t *testing.T) {
 	}
 }
 
+func TestHandleSequence_ParHappyPath(t *testing.T) {
+	q := &fakeQueue{}
+	h := newRouter(q)
+
+	body := map[string]any{"seq": []map[string]any{
+		{"type": "par", "branches": [][]map[string]any{
+			{{"type": "led", "on": true}},
+			{{"type": "servo", "angle_deg": 90.0}},
+		}},
+	}}
+	rec := doRequest(t, h, http.MethodPost, "/sequence", body)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && len(q.snapshot()) < 2 {
+		time.Sleep(2 * time.Millisecond)
+	}
+	got := q.snapshot()
+	if len(got) != 2 {
+		t.Fatalf("enqueued = %v, want 2 commands (one per branch)", got)
+	}
+}
+
+func TestHandleSequence_ParEmptyBranchesRejected(t *testing.T) {
+	q := &fakeQueue{}
+	h := newRouter(q)
+
+	body := map[string]any{"seq": []map[string]any{
+		{"type": "par", "branches": []any{}},
+	}}
+	rec := doRequest(t, h, http.MethodPost, "/sequence", body)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandleSequence_ParServoOutOfRangeInBranchRejected(t *testing.T) {
+	q := &fakeQueue{}
+	h := newRouter(q)
+
+	body := map[string]any{"seq": []map[string]any{
+		{"type": "par", "branches": [][]map[string]any{
+			{{"type": "led", "on": true}},
+			{{"type": "servo", "angle_deg": 999.0}},
+		}},
+	}}
+	rec := doRequest(t, h, http.MethodPost, "/sequence", body)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if got := q.snapshot(); len(got) != 0 {
+		t.Fatalf("enqueued = %v, want none", got)
+	}
+}
+
 func TestHandleSequence_WhileRunningReturns409(t *testing.T) {
 	q := &fakeQueue{}
 	h := newRouter(q)

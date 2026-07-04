@@ -173,12 +173,37 @@ components:
           description: Nested operations to repeat. Enforced non-empty in code (see docs/plan.md component 12's ErrEmptyLoopBody).
           items:
             $ref: '#/components/schemas/Operation'
+    ParOperation:
+      type: object
+      required: [type, branches]
+      properties:
+        type:
+          type: string
+          enum: [par]
+        branches:
+          type: array
+          minItems: 1
+          description: >
+            Each branch is a list of operations run concurrently with the
+            other branches (one goroutine per branch); the sequence only
+            continues past this step once every branch finishes. Enforced
+            non-empty (both the branch list and each branch) in code (see
+            docs/plan.md component 12's ErrEmptyPar/ErrEmptyParBranch).
+            Branches still funnel into the same command queue, so this
+            doesn't make hardware dispatch itself simultaneous — see
+            docs/architecture.md.
+          items:
+            type: array
+            minItems: 1
+            items:
+              $ref: '#/components/schemas/Operation'
     Operation:
       oneOf:
         - $ref: '#/components/schemas/LedOperation'
         - $ref: '#/components/schemas/ServoOperation'
         - $ref: '#/components/schemas/StepperOperation'
         - $ref: '#/components/schemas/LoopOperation'
+        - $ref: '#/components/schemas/ParOperation'
       discriminator:
         propertyName: type
         mapping:
@@ -186,6 +211,7 @@ components:
           servo: '#/components/schemas/ServoOperation'
           stepper: '#/components/schemas/StepperOperation'
           loop: '#/components/schemas/LoopOperation'
+          par: '#/components/schemas/ParOperation'
     SequenceRequest:
       type: object
       required: [seq]

@@ -27,6 +27,7 @@ type SequenceStepInput struct {
 	DelayMs  int     `json:"delay_ms,omitempty" jsonschema:"led/servo/stepper only: milliseconds to wait before this step runs"`
 	Times    int     `json:"times,omitempty" jsonschema:"loop only: number of repetitions; 0 or omitted means infinite (until stop_sequence)"`
 	Body     []any   `json:"body,omitempty" jsonschema:"loop only: nested steps (same shape as a top-level seq entry) to repeat"`
+	Branches [][]any `json:"branches,omitempty" jsonschema:"par only: each branch is a list of steps (same shape as a top-level seq entry) run concurrently with the others"`
 }
 
 // decodeStep re-decodes one Body element (already JSON-decoded generically
@@ -108,6 +109,30 @@ func toGenOperation(in SequenceStepInput) (apigen.Operation, error) {
 			Body:  body,
 		}); err != nil {
 			return op, fmt.Errorf("mcpserver: build loop operation: %w", err)
+		}
+
+	case "par":
+		branches := make([][]apigen.Operation, 0, len(in.Branches))
+		for _, rawBranch := range in.Branches {
+			branch := make([]apigen.Operation, 0, len(rawBranch))
+			for _, raw := range rawBranch {
+				nested, err := decodeStep(raw)
+				if err != nil {
+					return op, err
+				}
+				nestedOp, err := toGenOperation(nested)
+				if err != nil {
+					return op, err
+				}
+				branch = append(branch, nestedOp)
+			}
+			branches = append(branches, branch)
+		}
+		if err := op.FromParOperation(apigen.ParOperation{
+			Type:     "par",
+			Branches: branches,
+		}); err != nil {
+			return op, fmt.Errorf("mcpserver: build par operation: %w", err)
 		}
 
 	default:

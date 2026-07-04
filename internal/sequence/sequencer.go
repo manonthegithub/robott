@@ -100,10 +100,10 @@ func (s *Sequencer) run(ctx context.Context, ops []Operation) {
 }
 
 // exec recursively walks ops, enqueuing each HardwareCommand leaf (after its
-// delay) and repeating each Loop's Body Times times (or forever if
-// Times==0). It checks ctx at the top of every iteration so a Stop() during
-// an infinite loop takes effect within one iteration, not just between
-// top-level steps.
+// delay), repeating each Loop's Body Times times (or forever if Times==0),
+// and running each Par's Branches concurrently (join before continuing). It
+// checks ctx at the top of every iteration so a Stop() during an infinite
+// loop takes effect within one iteration, not just between top-level steps.
 func (s *Sequencer) exec(ctx context.Context, ops []Operation) error {
 	for _, op := range ops {
 		if err := ctx.Err(); err != nil {
@@ -119,12 +119,45 @@ func (s *Sequencer) exec(ctx context.Context, ops []Operation) error {
 					return err
 				}
 			}
+		case Par:
+			if err := s.execPar(ctx, o); err != nil {
+				return err
+			}
 		case HardwareCommand:
 			if err := command.DelayedEnqueue(ctx, s.Queue, o.Delay(), toCommand(o)); err != nil {
 				return err
 			}
 		default:
 			return ErrUnknownOperation
+		}
+	}
+	return nil
+}
+
+// execPar runs each of p.Branches in its own goroutine (each independently
+// walking its branch via exec against the same shared Queue) and waits for
+// all of them before returning. If more than one branch errors, the first
+// one observed is returned — which branch that is isn't deterministic,
+// since they run concurrently, but a Stop() (ctx cancellation) will surface
+// as context.Canceled from whichever branch happens to be reported first.
+func (s *Sequencer) execPar(ctx context.Context, p Par) error {
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(p.Branches))
+
+	for _, branch := range p.Branches {
+		wg.Add(1)
+		go func(branch []Operation) {
+			defer wg.Done()
+			errCh <- s.exec(ctx, branch)
+		}(branch)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			return err
 		}
 	}
 	return nil

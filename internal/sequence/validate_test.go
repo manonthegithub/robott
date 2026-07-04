@@ -149,3 +149,60 @@ func TestValidate_TripleNestedFiniteLoopsAreValid(t *testing.T) {
 		t.Fatalf("validate() on triple-nested loops error = %v, want nil", err)
 	}
 }
+
+func TestValidate_Par_HappyPath(t *testing.T) {
+	seq := []Operation{
+		Par{Branches: [][]Operation{
+			{NewLedCommand(true, 0), NewLedCommand(false, 100)},
+			{NewServoCommand(0, 0), NewServoCommand(180, 200)},
+		}},
+	}
+	if err := validate(seq, 0); err != nil {
+		t.Fatalf("validate() error = %v, want nil", err)
+	}
+}
+
+func TestValidate_Par_NoBranchesRejected(t *testing.T) {
+	seq := []Operation{Par{Branches: nil}}
+	if err := validate(seq, 0); !errors.Is(err, ErrEmptyPar) {
+		t.Fatalf("validate() error = %v, want ErrEmptyPar", err)
+	}
+}
+
+func TestValidate_Par_EmptyBranchRejected(t *testing.T) {
+	seq := []Operation{Par{Branches: [][]Operation{
+		{NewLedCommand(true, 0)},
+		{}, // empty branch
+	}}}
+	if err := validate(seq, 0); !errors.Is(err, ErrEmptyParBranch) {
+		t.Fatalf("validate() error = %v, want ErrEmptyParBranch", err)
+	}
+}
+
+func TestValidate_Par_ErrorInsideBranchPropagates(t *testing.T) {
+	seq := []Operation{Par{Branches: [][]Operation{
+		{NewLedCommand(true, 0)},
+		{NewStepperCommand(10, "sideways", 0)},
+	}}}
+	if err := validate(seq, 0); !errors.Is(err, ErrInvalidDir) {
+		t.Fatalf("validate() error = %v, want ErrInvalidDir", err)
+	}
+}
+
+func TestValidate_Par_CountsTowardMaxDepth(t *testing.T) {
+	var build func(depth int) []Operation
+	build = func(depth int) []Operation {
+		leaf := []Operation{NewLedCommand(true, 0)}
+		if depth == 0 {
+			return leaf
+		}
+		return []Operation{Par{Branches: [][]Operation{build(depth - 1)}}}
+	}
+
+	if err := validate(build(MaxDepth), 0); err != nil {
+		t.Fatalf("validate() at exactly MaxDepth (%d) via Par error = %v, want nil", MaxDepth, err)
+	}
+	if err := validate(build(MaxDepth+1), 0); !errors.Is(err, ErrTooDeep) {
+		t.Fatalf("validate() at MaxDepth+1 via Par error = %v, want ErrTooDeep", err)
+	}
+}

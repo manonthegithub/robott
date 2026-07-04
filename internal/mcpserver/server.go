@@ -72,7 +72,7 @@ func (s *Server) registerTools(server *mcp.Server) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "run_sequence",
-		Description: "Run an ordered list of led/servo/stepper steps and loops (loops repeat their nested body a number of times, or forever if times is 0/omitted) as a background sequence. Only one sequence may run at a time.",
+		Description: "Run an ordered list of led/servo/stepper steps, loops (repeat a nested body a number of times, or forever if times is 0/omitted), and par steps (run several branches concurrently, joining before continuing) as a background sequence. Only one sequence may run at a time.",
 	}, s.handleRunSequence)
 
 	mcp.AddTool(server, &mcp.Tool{

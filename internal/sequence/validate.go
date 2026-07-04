@@ -26,8 +26,13 @@ var (
 	// ErrTooDeep is returned when a sequence nests Loops beyond MaxDepth.
 	ErrTooDeep = fmt.Errorf("sequence: nesting exceeds max depth %d", MaxDepth)
 	// ErrUnknownOperation is returned for any Operation value that isn't a
-	// Loop or a recognized HardwareCommand.
+	// Loop, a Par, or a recognized HardwareCommand.
 	ErrUnknownOperation = errors.New("sequence: unrecognized operation type")
+	// ErrEmptyPar is returned when a Par has no branches — nothing to run
+	// concurrently, not a meaningful sequence step.
+	ErrEmptyPar = errors.New("sequence: par must have at least one branch")
+	// ErrEmptyParBranch is returned when one of a Par's branches is empty.
+	ErrEmptyParBranch = errors.New("sequence: par branch must not be empty")
 )
 
 // validate walks ops (and everything nested inside any Loop) checking every
@@ -49,6 +54,18 @@ func validate(ops []Operation, depth int) error {
 			}
 			if err := validate(o.Body, depth+1); err != nil {
 				return err
+			}
+		case Par:
+			if len(o.Branches) == 0 {
+				return ErrEmptyPar
+			}
+			for _, branch := range o.Branches {
+				if len(branch) == 0 {
+					return ErrEmptyParBranch
+				}
+				if err := validate(branch, depth+1); err != nil {
+					return err
+				}
 			}
 		case LedCommand:
 			if err := validateDelay(o); err != nil {

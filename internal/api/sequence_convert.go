@@ -69,6 +69,25 @@ func (h *Handlers) toOperation(op apigen.Operation) (sequence.Operation, error) 
 		}
 		return sequence.Loop{Times: intOrZero(loop.Times), Body: body}, nil
 
+	case "par":
+		par, err := op.AsParOperation()
+		if err != nil {
+			return nil, fmt.Errorf("sequence: %w", err)
+		}
+		branches := make([][]sequence.Operation, 0, len(par.Branches))
+		for _, branch := range par.Branches {
+			ops := make([]sequence.Operation, 0, len(branch))
+			for _, nested := range branch {
+				nestedOp, err := h.toOperation(nested)
+				if err != nil {
+					return nil, err
+				}
+				ops = append(ops, nestedOp)
+			}
+			branches = append(branches, ops)
+		}
+		return sequence.Par{Branches: branches}, nil
+
 	default:
 		return nil, fmt.Errorf("sequence: unknown type %q", disc)
 	}

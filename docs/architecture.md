@@ -99,6 +99,7 @@ type ServoCommand struct { baseHardwareCommand; AngleDeg float64 }
 type StepperCommand struct { baseHardwareCommand; Steps int; Dir string }
 
 type Loop struct { Body []Operation; Times int }  // Times == 0 means infinite
+type Par  struct { Branches [][]Operation }        // each branch runs concurrently, joins before continuing
 type OperationSequence struct { Seq []Operation }
 ```
 
@@ -114,13 +115,13 @@ type OperationSequence struct { Seq []Operation }
 
 `delay_ms` is optional on the 3 existing endpoints, default `0`, meaning "unchanged behavior" — see below.
 
-`Operation` (used both as `/sequence`'s array elements and nested inside `LoopOperation.body`) is a discriminated `oneOf` on `type`:
+`Operation` (used both as `/sequence`'s array elements and nested inside `LoopOperation.body`/`ParOperation.branches`) is a discriminated `oneOf` on `type`:
 ```yaml
 Operation:
-  oneOf: [LedOperation, ServoOperation, StepperOperation, LoopOperation]
+  oneOf: [LedOperation, ServoOperation, StepperOperation, LoopOperation, ParOperation]
   discriminator: {propertyName: type}
 ```
-`LedOperation`/`ServoOperation`/`StepperOperation` *are* the request schemas for `POST /led`/`/servo`/`/stepper` — there's no separate `LedRequest`/`ServoRequest`/`StepperRequest` alongside them; the standalone endpoints and the sequence leaves share the exact same schema (plus `type` and `delay_ms` on each), single source of truth for each command's fields. `LoopOperation` has `type: "loop"`, `times` (`0` = infinite), and `body: Operation[]`.
+`LedOperation`/`ServoOperation`/`StepperOperation` *are* the request schemas for `POST /led`/`/servo`/`/stepper` — there's no separate `LedRequest`/`ServoRequest`/`StepperRequest` alongside them; the standalone endpoints and the sequence leaves share the exact same schema (plus `type` and `delay_ms` on each), single source of truth for each command's fields. `LoopOperation` has `type: "loop"`, `times` (`0` = infinite), and `body: Operation[]`. `ParOperation` has `type: "par"` and `branches: Operation[][]` — each branch is a list of operations run concurrently with the others (see decision #7 below for what "concurrently" does and doesn't mean here).
 
 `202 Accepted` on `/led`/`/stepper`/`/servo` with `delay_ms==0` reflects reality exactly as before: queued, not executed. With `delay_ms>0`, `202` now means "will be queued after the delay" — the command isn't on the queue yet when the response is sent (see flagged decision #5). `202` on `/sequence` means the sequence goroutine has been started, not that any step has executed yet.
 
@@ -165,6 +166,13 @@ func (s *Sequencer) exec(ctx context.Context, ops []Operation) error {
                 if err := s.exec(ctx, o.Body); err != nil {
                     return err
                 }
+            }
+        case Par:
+            // one goroutine per branch, each running exec against the same
+            // shared Queue; join (sync.WaitGroup) before continuing past
+            // this step — see execPar in sequencer.go
+            if err := s.execPar(ctx, o); err != nil {
+                return err
             }
         case HardwareCommand:
             if err := command.DelayedEnqueue(ctx, s.Queue, o.Delay(), toCommand(o)); err != nil {
@@ -215,3 +223,5 @@ type ServoController interface {
 5. **Single-shot `delay_ms>0` responds `202` before the command is actually enqueued.** Previously `202` meant "on the queue now"; a delayed single command shifts that to "will be queued after the delay." Worth a doc/spec note so callers don't assume immediate queueing.
 
 6. **Only one sequence can run at a time — a second `POST /sequence` gets `409`, not queued to run after the first finishes.** Simplest option and matches the spec as given; if "queue the next sequence" is wanted later that's a bigger change (a wait-queue, not just a single slot) and should be scoped separately.
+
+7. **`Par` (fork/join branches) doesn't make hardware dispatch itself simultaneous — it only makes each branch's *pacing* independent of the others.** All branches still funnel into the one shared `CommandQueue`/single serial executor (decision #2), so two commands from different branches are still dispatched one after another, never at the literal same instant. In practice this looks concurrent because delays dominate (tens/hundreds of ms) and the actual GPIO/PWM write is near-instant — but if sub-millisecond synchronized actuation is ever needed, that requires per-device executor workers (the revisit already flagged in decision #2), not just `Par`.

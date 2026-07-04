@@ -614,3 +614,64 @@ nil (so existing callers/tests that don't set it are unaffected).
 constructs. New tests in `internal/sequence/sequencer_test.go`: a running
 sequence ends on its own when `Ctx` is cancelled without anyone calling
 `Stop()`, and the nil-`Ctx` fallback still behaves exactly as before.
+
+---
+
+## 17. `Par` (fork/join) — modifies components 12-16
+
+Motivation: a heartbeat blink and a servo sweep in the same sequence ran
+strictly one after the other (`Loop`/leaf steps are inherently sequential),
+which looked wrong for anything meant to happen "together." `Par` runs
+several branches concurrently and joins before the sequence continues — see
+`docs/architecture.md` decision #7 for exactly what "concurrently" does and
+doesn't guarantee (branch *pacing* is independent; hardware *dispatch* still
+serializes through the one shared queue/executor).
+
+**Steps**
+1. `internal/sequence/operation.go`: `Par{Branches [][]Operation}`.
+2. `internal/sequence/validate.go`: `ErrEmptyPar` (zero branches) /
+   `ErrEmptyParBranch` (any branch empty); each branch validated at
+   `depth+1`, same as a `Loop` body — so `Par` nesting counts toward
+   `MaxDepth` too.
+3. `internal/sequence/sequencer.go`: `exec`'s switch gains a `Par` case
+   calling `execPar`, which spawns one goroutine per branch (each calling
+   `exec` against the same shared `Queue`), `sync.WaitGroup`s for all of
+   them, and returns the first non-nil branch error (which branch that is
+   isn't deterministic — they're concurrent — but a `Stop()` will surface
+   as `context.Canceled` from whichever branch is reported first).
+4. `openapi.yaml`: `ParOperation{type: "par", branches: Operation[][]}`
+   (`minItems: 1` on both the branch list and each branch — structural
+   non-emptiness documented at the schema level even though it's enforced
+   in code), added to `Operation`'s `oneOf`/discriminator mapping.
+5. `internal/api/sequence_convert.go`: `toOperation`'s switch gains a `"par"`
+   case, recursing into each branch the same way the `"loop"` case recurses
+   into `Body`.
+6. `internal/mcpserver/sequence_convert.go`: `SequenceStepInput` gains
+   `Branches [][]any` (not `[][]SequenceStepInput` — same schema-reflection
+   cycle risk `Body []any` already dodges); `toGenOperation`'s `"par"` case
+   `decodeStep`s each branch element then builds `apigen.ParOperation` via
+   `FromParOperation`.
+
+**Error cases**
+- Same shape as `Loop`: `ErrEmptyPar`/`ErrEmptyParBranch` → `400` via
+  `sequence.validate` (REST) or an `IsError` tool result (MCP); a bad
+  operation inside any branch (e.g. out-of-range servo angle) is rejected
+  exactly as strictly as it would be outside a `Par`.
+
+**Definition of done**
+- `internal/sequence`: table-driven `validate` tests (happy path, no
+  branches, one empty branch, error inside a branch propagates, `Par`
+  nesting counts toward `MaxDepth`). `sequencer_test.go`: two branches with
+  different delays prove they raced independently (the faster branch's
+  command arrives first despite being listed second, not just "listed
+  first runs first"); a step after a `Par` only runs once *all* branches
+  finish (waits for the slowest, not the fastest); an infinite loop inside
+  each of two branches both end cleanly on `Stop()` (no hang).
+- `internal/api`: `/sequence` with a `par` step happy path, empty
+  `branches` rejected, out-of-range servo inside one branch rejected.
+- `internal/mcpserver`: `run_sequence` with a `par` step happy path
+  (`map[string]any` branch elements, the real JSON-decode shape), and
+  out-of-range servo inside a branch surfaces as an `IsError` result.
+- `go build ./... && go test ./...` green on the Pi (same unverified-codegen
+  caveat as components 14-16 — `ParOperation`/`FromParOperation`/
+  `AsParOperation` untested against real oapi-codegen output).

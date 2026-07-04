@@ -68,6 +68,18 @@ type Loop struct {
 	Times int
 }
 
+// Par runs each of Branches concurrently (one goroutine per branch, each
+// walking its branch the same way exec walks any []Operation), then waits
+// for all of them to finish before the sequence continues past this node.
+// Branches still funnel into the same shared CommandQueue/single serial
+// executor, so this doesn't make hardware dispatch itself simultaneous —
+// it makes each branch's own delay/pacing independent of the others, which
+// is what makes e.g. a blink pattern and a servo sweep look concurrent
+// instead of strictly one-after-the-other.
+type Par struct {
+	Branches [][]Operation
+}
+
 // OperationSequence is the top-level operation list a Sequencer runs.
 type OperationSequence struct {
 	Seq []Operation
